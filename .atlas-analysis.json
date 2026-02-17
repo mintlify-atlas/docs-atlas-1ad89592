@@ -1,0 +1,110 @@
+{
+  "projectType": "ai-ml",
+  "projectName": "nanoGPT",
+  "projectDescription": "The simplest, fastest repository for training and finetuning medium-sized GPT language models.",
+  "theme": "aspen",
+  "primaryColor": "#10B981",
+  "lightColor": "#34D399",
+  "darkColor": "#059669",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Training",
+            "pages": [
+              "training/overview",
+              "training/shakespeare",
+              "training/gpt2-reproduction",
+              "training/distributed",
+              "training/configuration"
+            ]
+          },
+          {
+            "group": "Model",
+            "pages": [
+              "model/architecture",
+              "model/gpt-config",
+              "model/components"
+            ]
+          },
+          {
+            "group": "Usage",
+            "pages": [
+              "usage/finetuning",
+              "usage/sampling",
+              "usage/benchmarking"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/optimization",
+              "advanced/multi-node",
+              "advanced/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core",
+            "pages": [
+              "api/gpt",
+              "api/gpt-config",
+              "api/components"
+            ]
+          },
+          {
+            "group": "Scripts",
+            "pages": [
+              "api/train",
+              "api/sample",
+              "api/bench"
+            ]
+          },
+          {
+            "group": "Data",
+            "pages": [
+              "api/data-preparation",
+              "api/datasets"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Simple ~300-line training loop and model definition",
+    "Reproduces GPT-2 (124M) on OpenWebText in 4 days on 8xA100",
+    "Character-level and BPE tokenization support",
+    "Finetuning from pretrained GPT-2 checkpoints",
+    "PyTorch 2.0 torch.compile() support for 2x speedup",
+    "Distributed training with DDP across multiple GPUs and nodes",
+    "Flash Attention for efficient training",
+    "Flexible configuration system via Python files"
+  ],
+  "publicApiSurface": [
+    "GPT",
+    "GPTConfig",
+    "CausalSelfAttention",
+    "MLP",
+    "Block",
+    "LayerNorm",
+    "train.py",
+    "sample.py",
+    "bench.py",
+    "configurator.py"
+  ]
+}
