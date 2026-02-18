@@ -1,0 +1,347 @@
+---
+title: 'Component Classes'
+description: 'Internal transformer component classes used by the GPT model'
+---
+
+# Component Classes
+
+This page documents the internal building blocks of the GPT model architecture. These classes are typically not instantiated directly but are used internally by the GPT class.
+
+## LayerNorm
+
+Custom Layer Normalization implementation with optional bias parameter.
+
+### Overview
+
+```python
+class LayerNorm(nn.Module):
+    """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
+    
+    def __init__(self, ndim, bias):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(ndim))
+        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
+```
+
+### Constructor
+
+#### `__init__(ndim, bias)`
+
+<ParamField path="ndim" type="int" required>
+  Normalized dimension size (typically `n_embd`)
+</ParamField>
+
+<ParamField path="bias" type="bool" required>
+  Whether to include a learnable bias parameter
+</ParamField>
+
+<Note>
+PyTorch's built-in LayerNorm doesn't support `bias=False`, so this custom implementation allows for bias-free layer normalization.
+</Note>
+
+### Methods
+
+#### `forward(input)`
+
+<ParamField path="input" type="torch.Tensor" required>
+  Input tensor to normalize
+</ParamField>
+
+<ResponseField name="output" type="torch.Tensor">
+  Normalized tensor with the same shape as input
+</ResponseField>
+
+Applies layer normalization with epsilon=1e-5:
+
+```python
+output = F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
+```
+
+---
+
+## CausalSelfAttention
+
+Multi-head causal self-attention mechanism with optional Flash Attention support.
+
+### Overview
+
+Implements masked self-attention where each position can only attend to previous positions (causal masking). Supports both standard attention and Flash Attention (PyTorch >= 2.0).
+
+```python
+class CausalSelfAttention(nn.Module):
+    def __init__(self, config):
+        # Creates attention with config.n_head heads
+        # Implements causal masking for autoregressive generation
+```
+
+### Constructor
+
+#### `__init__(config)`
+
+<ParamField path="config" type="GPTConfig" required>
+  Configuration object containing:
+  - `n_embd`: Embedding dimension
+  - `n_head`: Number of attention heads
+  - `bias`: Whether to use bias in linear layers
+  - `dropout`: Dropout probability
+  - `block_size`: Maximum sequence length
+</ParamField>
+
+<Note>
+Requires `config.n_embd % config.n_head == 0` (embedding dimension must be divisible by number of heads).
+</Note>
+
+#### Architecture Components
+
+- **c_attn**: Linear layer projecting to Q, K, V (size: `n_embd → 3 * n_embd`)
+- **c_proj**: Output projection layer (size: `n_embd → n_embd`)
+- **attn_dropout**: Dropout applied to attention weights
+- **resid_dropout**: Dropout applied to output
+- **bias** (optional): Causal mask buffer (only for PyTorch < 2.0)
+
+### Methods
+
+#### `forward(x)`
+
+<ParamField path="x" type="torch.Tensor" required>
+  Input tensor of shape `(batch_size, sequence_length, n_embd)`
+</ParamField>
+
+<ResponseField name="output" type="torch.Tensor">
+  Attention output of shape `(batch_size, sequence_length, n_embd)`
+</ResponseField>
+
+<Expandable title="Attention Mechanism Details">
+The forward pass:
+1. Projects input to Q, K, V using `c_attn`
+2. Reshapes to separate heads: `(B, T, n_embd)` → `(B, n_head, T, head_size)`
+3. Computes attention:
+   - **Flash Attention** (PyTorch >= 2.0): Uses `F.scaled_dot_product_attention` with `is_causal=True`
+   - **Standard Attention**: Manually computes `softmax(QK^T/√d_k)V` with causal masking
+4. Concatenates heads and projects with `c_proj`
+5. Applies residual dropout
+</Expandable>
+
+```python
+# Example usage (internal to GPT)
+attn = CausalSelfAttention(config)
+x = torch.randn(2, 10, 768)  # batch=2, seq_len=10, embd=768
+output = attn(x)  # shape: (2, 10, 768)
+```
+
+<Note>
+If Flash Attention is not available (PyTorch < 2.0), a warning is printed and the slower manual attention implementation is used.
+</Note>
+
+---
+
+## MLP
+
+Multi-Layer Perceptron (feed-forward network) used in each transformer block.
+
+### Overview
+
+Two-layer feed-forward network with GELU activation, following the standard transformer architecture with a hidden size of `4 * n_embd`.
+
+```python
+class MLP(nn.Module):
+    def __init__(self, config):
+        # n_embd → 4*n_embd → n_embd
+        # with GELU activation and dropout
+```
+
+### Constructor
+
+#### `__init__(config)`
+
+<ParamField path="config" type="GPTConfig" required>
+  Configuration object containing:
+  - `n_embd`: Embedding dimension
+  - `bias`: Whether to use bias in linear layers
+  - `dropout`: Dropout probability
+</ParamField>
+
+#### Architecture Components
+
+- **c_fc**: First linear layer (expansion): `n_embd → 4 * n_embd`
+- **gelu**: GELU activation function
+- **c_proj**: Second linear layer (projection): `4 * n_embd → n_embd`
+- **dropout**: Dropout layer applied to output
+
+<Note>
+The 4x expansion factor (`4 * n_embd`) is standard in transformer architectures and provides increased representational capacity.
+</Note>
+
+### Methods
+
+#### `forward(x)`
+
+<ParamField path="x" type="torch.Tensor" required>
+  Input tensor of shape `(batch_size, sequence_length, n_embd)`
+</ParamField>
+
+<ResponseField name="output" type="torch.Tensor">
+  MLP output of shape `(batch_size, sequence_length, n_embd)`
+</ResponseField>
+
+```python
+# Forward pass computation
+x = self.c_fc(x)      # Expand to 4*n_embd
+x = self.gelu(x)      # Non-linear activation
+x = self.c_proj(x)    # Project back to n_embd
+x = self.dropout(x)   # Regularization
+return x
+```
+
+---
+
+## Block
+
+A single transformer block combining attention and MLP with residual connections.
+
+### Overview
+
+Implements one layer of the GPT transformer, consisting of:
+1. Layer normalization → Multi-head attention → Residual connection
+2. Layer normalization → MLP → Residual connection
+
+```python
+class Block(nn.Module):
+    def __init__(self, config):
+        # Pre-norm architecture:
+        # x = x + attn(ln(x))
+        # x = x + mlp(ln(x))
+```
+
+### Constructor
+
+#### `__init__(config)`
+
+<ParamField path="config" type="GPTConfig" required>
+  Configuration object passed to CausalSelfAttention and MLP
+</ParamField>
+
+#### Architecture Components
+
+- **ln_1**: First layer normalization (before attention)
+- **attn**: Causal self-attention module
+- **ln_2**: Second layer normalization (before MLP)
+- **mlp**: Feed-forward network
+
+<Note>
+This uses pre-normalization (Pre-LN) where layer norm is applied before the sub-layer, which is more stable than post-normalization.
+</Note>
+
+### Methods
+
+#### `forward(x)`
+
+<ParamField path="x" type="torch.Tensor" required>
+  Input tensor of shape `(batch_size, sequence_length, n_embd)`
+</ParamField>
+
+<ResponseField name="output" type="torch.Tensor">
+  Block output of shape `(batch_size, sequence_length, n_embd)`
+</ResponseField>
+
+```python
+# Forward pass with residual connections
+x = x + self.attn(self.ln_1(x))  # Attention path
+x = x + self.mlp(self.ln_2(x))   # MLP path
+return x
+```
+
+<Expandable title="Residual Connection Benefits">
+Residual connections (skip connections) provide several benefits:
+- Enable training of very deep networks by mitigating gradient vanishing
+- Allow gradient to flow directly through the network
+- Provide an identity path for information flow
+- Each block learns residual modifications rather than full transformations
+</Expandable>
+
+---
+
+## Architecture Diagram
+
+```python
+GPT Model Architecture:
+
+Input Tokens (idx)
+       ↓
+  Token Embedding (wte)
+       +
+  Position Embedding (wpe)
+       ↓
+    Dropout
+       ↓
+  ┌─────────────┐
+  │   Block 1   │ ← LayerNorm → CausalSelfAttention → Residual
+  │             │ ← LayerNorm → MLP → Residual
+  ├─────────────┤
+  │   Block 2   │
+  ├─────────────┤
+  │     ...     │
+  ├─────────────┤
+  │  Block n_layer │
+  └─────────────┘
+       ↓
+  Final LayerNorm (ln_f)
+       ↓
+  Language Model Head (lm_head)
+       ↓
+  Logits [vocab_size]
+```
+
+## Usage Notes
+
+<Note>
+These component classes are typically not instantiated directly by users. They are internal building blocks used by the GPT class.
+</Note>
+
+However, if you need to customize the architecture:
+
+```python
+from model import Block, GPTConfig
+
+# Create a single transformer block
+config = GPTConfig(n_embd=768, n_head=12)
+block = Block(config)
+
+# Use it
+x = torch.randn(1, 10, 768)  # batch=1, seq=10, embd=768
+output = block(x)
+```
+
+## Performance Considerations
+
+### Flash Attention
+
+<Note>
+Flash Attention (PyTorch >= 2.0) provides significant speedups:
+- 2-4x faster attention computation
+- Reduced memory usage
+- Automatic handling of causal masking
+
+Upgrade to PyTorch 2.0+ for best performance.
+</Note>
+
+### Memory Usage
+
+Attention memory scales as O(sequence_length²) due to the attention matrix. For long sequences:
+- Consider gradient checkpointing
+- Use Flash Attention to reduce memory
+- Process sequences in smaller chunks
+
+### Computational Complexity
+
+Per transformer block:
+- Attention: O(n² × d) where n=sequence_length, d=n_embd
+- MLP: O(n × d²)
+- Total: O(n² × d + n × d²)
+
+For typical configs where n < d, MLP dominates computational cost.
+
+## See Also
+
+- [GPT Class](/api/gpt) - Main model using these components
+- [GPTConfig](/api/gpt-config) - Configuration for all components

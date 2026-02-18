@@ -1,0 +1,606 @@
+---
+title: "Reproducing GPT-2 (124M)"
+description: "Complete guide to reproducing OpenAI's GPT-2 124M model on OpenWebText"
+---
+
+## Overview
+
+This guide shows how to reproduce OpenAI's GPT-2 (124M parameter) model using nanoGPT. The training achieves a validation loss of ~2.85 on OpenWebText, matching the performance of a finetuned GPT-2 model on this dataset.
+
+<Info>
+This is a serious deep learning project requiring significant computational resources: 8x A100 40GB GPUs for ~4 days of training.
+</Info>
+
+## Quick Reference
+
+```bash
+# 1. Prepare OpenWebText dataset
+python data/openwebtext/prepare.py
+
+# 2. Train GPT-2 (124M) with DDP on 8 GPUs
+torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
+
+# 3. Sample from trained model
+python sample.py --out_dir=out
+```
+
+## Dataset Preparation
+
+### OpenWebText Dataset
+
+OpenWebText is an open-source reproduction of OpenAI's WebText dataset, containing ~8 million documents (40GB of text).
+
+<Steps>
+  <Step title="Download and Tokenize">
+    Run the preparation script:
+
+    ```bash
+    python data/openwebtext/prepare.py
+    ```
+
+    This will:
+    1. Download OpenWebText from HuggingFace datasets (~54GB download)
+    2. Tokenize using GPT-2's BPE tokenizer (tiktoken)
+    3. Create `train.bin` and `val.bin` files
+    4. Save vocabulary metadata
+
+    <Warning>
+    This process requires ~100GB of disk space and takes 1-2 hours depending on your CPU and network speed.
+    </Warning>
+  </Step>
+
+  <Step title="Verify Data Files">
+    Check the created files:
+
+    ```bash
+    ls -lh data/openwebtext/
+    # Should show:
+    # train.bin (~17GB) - Training split
+    # val.bin (~8.5MB) - Validation split
+    # meta.pkl - Vocabulary metadata (vocab_size=50257)
+    ```
+  </Step>
+</Steps>
+
+### Dataset Statistics
+
+- **Total tokens**: ~9 billion tokens
+- **Vocabulary size**: 50,257 (GPT-2 BPE)
+- **Train/val split**: 99.95% / 0.05%
+- **Tokenizer**: tiktoken (OpenAI's fast BPE)
+
+## Training Configuration
+
+The `config/train_gpt2.py` configuration file:
+
+```python
+# config for training GPT-2 (124M) down to very nice loss of ~2.85
+# launch as: torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
+
+wandb_log = True
+wandb_project = 'owt'
+wandb_run_name = 'gpt2-124M'
+
+# these make the total batch size be ~0.5M
+# 12 batch size * 1024 block size * 5 gradaccum * 8 GPUs = 491,520
+batch_size = 12
+block_size = 1024
+gradient_accumulation_steps = 5 * 8
+
+# this makes total number of tokens be 300B
+max_iters = 600000
+lr_decay_iters = 600000
+
+# eval stuff
+eval_interval = 1000
+eval_iters = 200
+log_interval = 10
+
+# weight decay
+weight_decay = 1e-1
+```
+
+### Architecture Details
+
+GPT-2 (124M) architecture (from train.py:51-56 defaults):
+
+```python
+n_layer = 12          # 12 transformer layers
+n_head = 12           # 12 attention heads
+n_embd = 768          # 768 dimensional embeddings
+block_size = 1024     # 1024 token context length
+dropout = 0.0         # No dropout for pretraining
+bias = False          # No bias in LayerNorm and Linear layers
+```
+
+**Total parameters**: 124M
+
+### Batch Size Configuration
+
+The effective batch size calculation:
+
+```python
+# Per-GPU micro-batch
+batch_size = 12
+
+# Gradient accumulation steps per GPU
+gradient_accumulation_steps = 40  # (5 * 8, divided by world_size in DDP)
+
+# Number of GPUs
+num_gpus = 8
+
+# Effective batch size in tokens
+tokens_per_iter = batch_size * block_size * gradient_accumulation_steps * num_gpus
+                = 12 * 1024 * 40 * 8
+                = 3,932,160 tokens per iteration
+
+# Effective batch size in sequences
+sequences_per_iter = batch_size * gradient_accumulation_steps * num_gpus
+                    = 12 * 40 * 8
+                    = 3,840 sequences
+```
+
+<Info>
+The ~500K token batch size roughly matches the original GPT-2 training configuration.
+</Info>
+
+### Training Schedule
+
+```python
+# Total training
+max_iters = 600000                    # 600K iterations
+total_tokens = 600000 * 3932160       # ~2.36 trillion tokens
+                                      # (Note: dataset has ~9B tokens, so ~262 epochs)
+
+# Learning rate schedule
+learning_rate = 6e-4                  # Peak learning rate
+warmup_iters = 2000                   # 2K iteration warmup
+lr_decay_iters = 600000               # Cosine decay over full training
+min_lr = 6e-5                         # Minimum LR (10x lower than peak)
+
+# Optimization
+weight_decay = 1e-1                   # L2 regularization
+beta1 = 0.9                           # Adam beta1
+beta2 = 0.95                          # Adam beta2
+grad_clip = 1.0                       # Gradient clipping threshold
+```
+
+## Training on Single Node (8 GPUs)
+
+<Tabs>
+  <Tab title="8x A100 40GB (Recommended)">
+    Launch training with PyTorch DDP:
+
+    ```bash
+    torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
+    ```
+
+    **Expected training metrics:**
+    ```
+    tokens per iteration will be: 3,932,160
+    Initializing a new model from scratch
+    found vocab_size = 50257 (inside data/openwebtext/meta.pkl)
+    compiling the model... (takes a ~minute)
+    iter 0: loss 10.9392, time 456.23ms, mfu 0.00%
+    iter 10: loss 9.2341, time 187.45ms, mfu 28.34%
+    step 1000: train loss 4.5234, val loss 4.5891
+    iter 1000: loss 4.5123, time 183.21ms, mfu 31.45%
+    step 2000: train loss 3.9234, val loss 3.9567
+    ...
+    step 100000: train loss 3.1245, val loss 3.2134
+    ...
+    step 600000: train loss 2.8123, val loss 2.8534
+    ```
+
+    **Training time**: ~4 days  
+    **Final validation loss**: ~2.85  
+    **Peak MFU**: ~30-35% on A100
+  </Tab>
+
+  <Tab title="8x A100 80GB">
+    With more memory, you can increase batch size:
+
+    ```bash
+    torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py \
+      --batch_size=20 \
+      --gradient_accumulation_steps=32
+    ```
+
+    This increases throughput while maintaining similar effective batch size.
+  </Tab>
+
+  <Tab title="Fewer GPUs">
+    With 4 GPUs, adjust gradient accumulation:
+
+    ```bash
+    torchrun --standalone --nproc_per_node=4 train.py config/train_gpt2.py \
+      --gradient_accumulation_steps=80
+    ```
+
+    This maintains the same effective batch size but trains slower (fewer parallel workers).
+    
+    **Training time**: ~8 days on 4x A100
+  </Tab>
+</Tabs>
+
+### Memory Requirements
+
+Per-GPU memory breakdown:
+
+```
+Model parameters:           ~500 MB  (124M * 4 bytes)
+Gradients:                  ~500 MB
+Optimizer states (Adam):    ~1.5 GB  (2 momentum buffers)
+Activations (batch_size=12): ~8 GB
+Mixed precision overhead:    ~1 GB
+PyTorch overhead:           ~1 GB
+─────────────────────────────────
+Total per GPU:              ~12 GB
+```
+
+<Note>
+The training comfortably fits in 40GB A100s with room for compilation caches and system overhead.
+</Note>
+
+## Multi-Node Training
+
+For faster training, use multiple nodes:
+
+<Steps>
+  <Step title="Setup Master Node">
+    On the first node (e.g., IP 123.456.123.456):
+
+    ```bash
+    torchrun \
+      --nproc_per_node=8 \
+      --nnodes=2 \
+      --node_rank=0 \
+      --master_addr=123.456.123.456 \
+      --master_port=1234 \
+      train.py config/train_gpt2.py
+    ```
+  </Step>
+
+  <Step title="Setup Worker Node(s)">
+    On the second node:
+
+    ```bash
+    torchrun \
+      --nproc_per_node=8 \
+      --nnodes=2 \
+      --node_rank=1 \
+      --master_addr=123.456.123.456 \
+      --master_port=1234 \
+      train.py config/train_gpt2.py
+    ```
+  </Step>
+
+  <Step title="Without Infiniband">
+    If your cluster lacks Infiniband, disable IB:
+
+    ```bash
+    NCCL_IB_DISABLE=1 torchrun \
+      --nproc_per_node=8 \
+      --nnodes=2 \
+      --node_rank=0 \
+      --master_addr=123.456.123.456 \
+      --master_port=1234 \
+      train.py config/train_gpt2.py
+    ```
+
+    <Warning>
+    Without Infiniband, multi-node training will be significantly slower due to network bottlenecks. Benchmark your interconnect with `iperf3` first.
+    </Warning>
+  </Step>
+</Steps>
+
+### Multi-Node Scaling
+
+**2 nodes (16 GPUs):**
+- Training time: ~2 days
+- Effective batch size: automatically maintained
+- Speedup: ~1.8-1.9x (not perfect 2x due to communication overhead)
+
+**4 nodes (32 GPUs):**
+- Training time: ~1 day
+- Speedup: ~3.5-3.8x
+
+## Monitoring Training Progress
+
+### Key Metrics
+
+<CodeGroup>
+```bash Loss Trajectory
+iter 0:       loss 10.94  # Random initialization
+iter 1000:    loss 4.52   # Learning basic statistics
+iter 10000:   loss 3.65   # Learning common patterns
+iter 100000:  loss 3.12   # Approaching baseline
+iter 600000:  loss 2.85   # Target reached!
+```
+
+```bash Validation Loss
+step 0:       val 10.95   # Initial random
+step 50000:   val 3.45
+step 100000:  val 3.21
+step 200000:  val 3.05
+step 400000:  val 2.93
+step 600000:  val 2.85    # Final target
+```
+
+```bash Hardware Efficiency
+iter 10:  mfu 28.34%     # Model warming up
+iter 100: mfu 31.45%     # Reaching steady state
+iter 500: mfu 32.89%     # Optimal performance
+# MFU = Model FLOPs Utilization
+# Higher is better, 30-35% is excellent for A100s
+```
+</CodeGroup>
+
+### Weights & Biases Dashboard
+
+The config enables W&B logging by default:
+
+```python
+wandb_log = True
+wandb_project = 'owt'
+wandb_run_name = 'gpt2-124M'
+```
+
+Logged metrics:
+- **train/loss** - Training loss curve
+- **val/loss** - Validation loss curve  
+- **lr** - Learning rate schedule
+- **mfu** - Model FLOPs Utilization
+- **iter** - Iteration number
+
+<Info>
+W&B provides real-time monitoring, loss curve comparisons, and run management.
+</Info>
+
+## Baseline Comparisons
+
+OpenAI's GPT-2 models evaluated on OpenWebText:
+
+```bash
+# Evaluate pretrained GPT-2 checkpoints
+python train.py config/eval_gpt2.py        # 124M
+python train.py config/eval_gpt2_medium.py # 350M
+python train.py config/eval_gpt2_large.py  # 774M
+python train.py config/eval_gpt2_xl.py     # 1558M
+```
+
+| Model | Parameters | Train Loss | Val Loss |
+|-------|-----------|------------|----------|
+| gpt2 | 124M | 3.11 | 3.12 |
+| gpt2-medium | 350M | 2.85 | 2.84 |
+| gpt2-large | 774M | 2.66 | 2.67 |
+| gpt2-xl | 1558M | 2.56 | 2.54 |
+
+<Note>
+**Important context**: GPT-2 was trained on WebText (private), not OpenWebText. There's a dataset domain gap. When you finetune GPT-2 (124M) on OpenWebText, it reaches ~2.85, which becomes the appropriate reproduction target.
+</Note>
+
+## Reproducing Larger Models
+
+### GPT-2 Medium (350M)
+
+Adjust the architecture:
+
+```python
+n_layer = 24
+n_head = 16
+n_embd = 1024
+```
+
+Memory: ~25GB per GPU, requires A100 40GB or better.
+
+### GPT-2 Large (774M)
+
+```python
+n_layer = 36
+n_head = 20  
+n_embd = 1280
+```
+
+Memory: ~35GB per GPU, requires A100 40GB or A100 80GB.
+
+### GPT-2 XL (1558M)
+
+```python
+n_layer = 48
+n_head = 25
+n_embd = 1600
+```
+
+Memory: ~50GB per GPU, requires A100 80GB.
+
+<Warning>
+Larger models require adjusting batch_size and gradient_accumulation_steps to fit in memory.
+</Warning>
+
+## Checkpointing and Resuming
+
+### Automatic Checkpointing
+
+Checkpoints are saved automatically every `eval_interval` (default: 1000 iterations):
+
+```python
+checkpoint = {
+    'model': model.state_dict(),
+    'optimizer': optimizer.state_dict(),
+    'model_args': model_args,
+    'iter_num': iter_num,
+    'best_val_loss': best_val_loss,
+    'config': config,
+}
+torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+```
+
+Saved to: `out/ckpt.pt` (default `out_dir`)
+
+### Resuming Training
+
+If training is interrupted:
+
+```bash
+torchrun --standalone --nproc_per_node=8 train.py \
+  config/train_gpt2.py \
+  --init_from=resume \
+  --out_dir=out
+```
+
+This:
+1. Loads model weights from `out/ckpt.pt`
+2. Restores optimizer state (momentum buffers)
+3. Continues from saved iteration number
+4. Maintains best validation loss
+
+<Info>
+Checkpointing is robust to interruptions. Always resume with the same configuration file.
+</Info>
+
+## Sampling from Trained Model
+
+### Basic Sampling
+
+```bash
+python sample.py --out_dir=out
+```
+
+### Advanced Sampling
+
+<CodeGroup>
+```bash Custom Prompt
+python sample.py \
+  --out_dir=out \
+  --start="In a shocking finding, scientists discovered" \
+  --num_samples=5 \
+  --max_new_tokens=200
+```
+
+```bash From File
+echo "The future of artificial intelligence" > prompt.txt
+python sample.py \
+  --out_dir=out \
+  --start=FILE:prompt.txt \
+  --max_new_tokens=500
+```
+
+```bash Temperature & Top-k
+python sample.py \
+  --out_dir=out \
+  --temperature=0.9 \
+  --top_k=50 \
+  --num_samples=10
+```
+</CodeGroup>
+
+## Performance Optimization Tips
+
+### 1. Use bfloat16 on A100
+
+```bash
+# Default is automatic, but can force:
+python train.py config/train_gpt2.py --dtype=bfloat16
+```
+
+Bfloat16 is faster than float16 on A100s and doesn't need gradient scaling.
+
+### 2. Enable torch.compile
+
+```python
+compile = True  # Default, provides ~40% speedup
+```
+
+First iteration is slow (~1 minute compilation), then much faster.
+
+### 3. Tune Gradient Accumulation
+
+Balance memory vs. throughput:
+
+```bash
+# More accumulation = less memory, but same effective batch size
+torchrun --standalone --nproc_per_node=8 train.py \
+  config/train_gpt2.py \
+  --batch_size=6 \
+  --gradient_accumulation_steps=80
+```
+
+### 4. Profile Your Setup
+
+Use the benchmarking script:
+
+```bash
+python bench.py
+```
+
+This profiles the training loop without other complexities.
+
+## Troubleshooting
+
+### Out of Memory
+
+<Tabs>
+  <Tab title="Reduce Batch Size">
+    ```bash
+    torchrun --standalone --nproc_per_node=8 train.py \
+      config/train_gpt2.py \
+      --batch_size=8 \
+      --gradient_accumulation_steps=60
+    ```
+  </Tab>
+
+  <Tab title="Reduce Context Length">
+    ```bash
+    torchrun --standalone --nproc_per_node=8 train.py \
+      config/train_gpt2.py \
+      --block_size=512 \
+      --gradient_accumulation_steps=80
+    ```
+  </Tab>
+
+  <Tab title="Use Gradient Checkpointing">
+    Modify model.py to enable gradient checkpointing (trades computation for memory).
+  </Tab>
+</Tabs>
+
+### Slow Multi-Node Training
+
+<Warning>
+Check your network interconnect:
+</Warning>
+
+```bash
+# Benchmark network between nodes
+iperf3 -s  # On master node
+iperf3 -c <master_ip>  # On worker node
+
+# Good: >25 Gbps (Infiniband)
+# Acceptable: >10 Gbps (10GbE)
+# Slow: <10 Gbps (will bottleneck training)
+```
+
+### Loss Not Decreasing
+
+Check:
+1. Data preparation completed successfully
+2. Learning rate is appropriate (6e-4 default is good)
+3. Gradient accumulation maintains effective batch size
+4. No NaN/Inf in gradients (check with `--grad_clip=1.0`)
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Distributed Training" icon="server" href="/training/distributed">
+    Deep dive into DDP and multi-node training
+  </Card>
+  <Card title="Finetuning" icon="wand-magic-sparkles" href="/training/shakespeare">
+    Finetune pretrained models on custom data
+  </Card>
+  <Card title="Sampling Guide" icon="magic" href="/usage/sampling">
+    Advanced sampling and generation techniques
+  </Card>
+  <Card title="Model Architecture" icon="brain" href="/model/architecture">
+    Understanding the GPT model architecture
+  </Card>
+</CardGroup>

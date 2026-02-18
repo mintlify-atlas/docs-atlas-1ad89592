@@ -1,0 +1,299 @@
+---
+title: 'GPT Class'
+description: 'Complete API reference for the GPT model class'
+---
+
+# GPT Class
+
+The main GPT language model class that implements the transformer architecture.
+
+## Constructor
+
+### `__init__(config)`
+
+Initializes a new GPT model with the specified configuration.
+
+<ParamField path="config" type="GPTConfig" required>
+  Configuration object containing model hyperparameters
+</ParamField>
+
+<Note>
+The constructor automatically initializes all weights using scaled initialization and reports the total number of parameters.
+</Note>
+
+#### Architecture Components
+
+The model consists of:
+- **Token embeddings** (`wte`): Embedding layer for vocabulary tokens
+- **Position embeddings** (`wpe`): Embedding layer for positional encoding
+- **Transformer blocks** (`h`): Stack of `n_layer` transformer blocks
+- **Layer normalization** (`ln_f`): Final layer normalization
+- **Language model head** (`lm_head`): Output projection to vocabulary size
+
+<Note>
+Weight tying is applied between token embeddings and the language model head for efficiency.
+</Note>
+
+## Methods
+
+### `forward(idx, targets=None)`
+
+Forward pass through the model.
+
+<ParamField path="idx" type="torch.LongTensor" required>
+  Input token indices of shape `(batch_size, sequence_length)`
+</ParamField>
+
+<ParamField path="targets" type="torch.LongTensor" default="None">
+  Target token indices for training. If provided, loss will be computed. Shape: `(batch_size, sequence_length)`
+</ParamField>
+
+<ResponseField name="logits" type="torch.FloatTensor">
+  Model output logits. During training: shape `(batch_size, sequence_length, vocab_size)`. During inference: shape `(batch_size, 1, vocab_size)` (only last position)
+</ResponseField>
+
+<ResponseField name="loss" type="torch.FloatTensor | None">
+  Cross-entropy loss if targets are provided, otherwise None
+</ResponseField>
+
+```python
+# Training example
+logits, loss = model(input_ids, targets=target_ids)
+
+# Inference example
+logits, _ = model(input_ids)
+```
+
+<Note>
+During inference (when targets=None), only the final position is processed through the language model head as an optimization.
+</Note>
+
+### `generate(idx, max_new_tokens, temperature=1.0, top_k=None)`
+
+Generate new tokens autoregressively from a conditioning sequence.
+
+<ParamField path="idx" type="torch.LongTensor" required>
+  Conditioning sequence of token indices, shape `(batch_size, sequence_length)`
+</ParamField>
+
+<ParamField path="max_new_tokens" type="int" required>
+  Number of new tokens to generate
+</ParamField>
+
+<ParamField path="temperature" type="float" default="1.0">
+  Sampling temperature. Higher values (&gt;1.0) increase randomness, lower values (&lt;1.0) make output more deterministic
+</ParamField>
+
+<ParamField path="top_k" type="int | None" default="None">
+  If specified, only sample from the top k most likely tokens at each step
+</ParamField>
+
+<ResponseField name="output" type="torch.LongTensor">
+  Generated sequence including the conditioning sequence, shape `(batch_size, sequence_length + max_new_tokens)`
+</ResponseField>
+
+```python
+import torch
+
+# Generate 100 tokens from a seed sequence
+model.eval()
+with torch.no_grad():
+    seed = torch.tensor([[1, 2, 3]], dtype=torch.long)
+    output = model.generate(seed, max_new_tokens=100, temperature=0.8, top_k=40)
+```
+
+<Note>
+This method uses the `@torch.no_grad()` decorator. Make sure the model is in evaluation mode using `model.eval()` before calling.
+</Note>
+
+### `configure_optimizers(weight_decay, learning_rate, betas, device_type)`
+
+Configures AdamW optimizer with parameter-specific weight decay settings.
+
+<ParamField path="weight_decay" type="float" required>
+  Weight decay coefficient for regularization
+</ParamField>
+
+<ParamField path="learning_rate" type="float" required>
+  Learning rate for the optimizer
+</ParamField>
+
+<ParamField path="betas" type="tuple[float, float]" required>
+  AdamW beta parameters (beta1, beta2)
+</ParamField>
+
+<ParamField path="device_type" type="str" required>
+  Device type ('cuda' or 'cpu'). Used to enable fused AdamW on CUDA devices
+</ParamField>
+
+<ResponseField name="optimizer" type="torch.optim.AdamW">
+  Configured AdamW optimizer with two parameter groups
+</ResponseField>
+
+<Expandable title="Parameter Grouping Strategy">
+The method intelligently groups parameters for weight decay:
+- **Decay group**: All 2D+ tensors (weight matrices in linear layers and embeddings)
+- **No-decay group**: All 1D tensors (biases and layer norm parameters)
+
+This follows best practices for transformer optimization.
+</Expandable>
+
+```python
+optimizer = model.configure_optimizers(
+    weight_decay=0.1,
+    learning_rate=6e-4,
+    betas=(0.9, 0.95),
+    device_type='cuda'
+)
+```
+
+### `estimate_mfu(fwdbwd_per_iter, dt)`
+
+Estimate model FLOPS utilization (MFU) in units of A100 bfloat16 peak FLOPS.
+
+<ParamField path="fwdbwd_per_iter" type="int" required>
+  Number of forward-backward passes per iteration (batch size * gradient accumulation steps)
+</ParamField>
+
+<ParamField path="dt" type="float" required>
+  Time elapsed for the iteration in seconds
+</ParamField>
+
+<ResponseField name="mfu" type="float">
+  Model FLOPS utilization as a ratio of A100 peak performance (0.0 to 1.0)
+</ResponseField>
+
+<Note>
+This calculation assumes A100 GPU bfloat16 peak performance of 312 TFLOPS. The formula follows the PaLM paper (Appendix B).
+</Note>
+
+```python
+import time
+
+t0 = time.time()
+# ... training iteration ...
+dt = time.time() - t0
+mfu = model.estimate_mfu(fwdbwd_per_iter=32, dt=dt)
+print(f"MFU: {mfu*100:.2f}%")
+```
+
+### `get_num_params(non_embedding=True)`
+
+Return the number of parameters in the model.
+
+<ParamField path="non_embedding" type="bool" default="True">
+  If True, excludes position embedding parameters from the count
+</ParamField>
+
+<ResponseField name="n_params" type="int">
+  Total number of parameters
+</ResponseField>
+
+<Note>
+By default, position embeddings are excluded but token embeddings are included due to weight tying with the language model head.
+</Note>
+
+### `crop_block_size(block_size)`
+
+Reduce the model's block size (context length) after initialization.
+
+<ParamField path="block_size" type="int" required>
+  New block size (must be ≤ current block_size)
+</ParamField>
+
+<Note>
+This performs "model surgery" by truncating position embeddings and attention masks. Useful when loading a pretrained model with large context but using a smaller context for efficiency.
+</Note>
+
+```python
+# Load GPT-2 (block_size=1024) but use smaller context
+model = GPT.from_pretrained('gpt2')
+model.crop_block_size(512)  # Reduce to 512 tokens
+```
+
+## Class Methods
+
+### `from_pretrained(model_type, override_args=None)`
+
+Load pretrained GPT-2 weights from HuggingFace.
+
+<ParamField path="model_type" type="str" required>
+  Model variant to load. Must be one of:
+  - `'gpt2'`: 124M parameters (12 layers, 12 heads, 768 dim)
+  - `'gpt2-medium'`: 350M parameters (24 layers, 16 heads, 1024 dim)
+  - `'gpt2-large'`: 774M parameters (36 layers, 20 heads, 1280 dim)
+  - `'gpt2-xl'`: 1558M parameters (48 layers, 25 heads, 1600 dim)
+</ParamField>
+
+<ParamField path="override_args" type="dict" default="None">
+  Optional dictionary to override configuration. Only `'dropout'` key is supported
+</ParamField>
+
+<ResponseField name="model" type="GPT">
+  Initialized GPT model with pretrained weights loaded
+</ResponseField>
+
+```python
+# Load base GPT-2
+model = GPT.from_pretrained('gpt2')
+
+# Load with custom dropout
+model = GPT.from_pretrained('gpt2-medium', override_args={'dropout': 0.1})
+```
+
+<Note>
+This method requires the `transformers` library to be installed. It automatically handles weight transposition from HuggingFace's Conv1D to PyTorch Linear layers.
+</Note>
+
+## Attributes
+
+<ResponseField name="config" type="GPTConfig">
+  Configuration object containing model hyperparameters
+</ResponseField>
+
+<ResponseField name="transformer" type="nn.ModuleDict">
+  Dictionary containing transformer components:
+  - `wte`: Token embedding
+  - `wpe`: Position embedding
+  - `drop`: Dropout layer
+  - `h`: List of transformer blocks
+  - `ln_f`: Final layer normalization
+</ResponseField>
+
+<ResponseField name="lm_head" type="nn.Linear">
+  Output projection layer to vocabulary logits
+</ResponseField>
+
+## Example Usage
+
+```python
+import torch
+from model import GPT, GPTConfig
+
+# Create a small model from scratch
+config = GPTConfig(
+    block_size=256,
+    vocab_size=50304,
+    n_layer=6,
+    n_head=6,
+    n_embd=384,
+    dropout=0.1
+)
+model = GPT(config)
+
+# Or load pretrained GPT-2
+model = GPT.from_pretrained('gpt2')
+
+# Training
+model.train()
+input_ids = torch.randint(0, 50304, (4, 256))  # batch_size=4, seq_len=256
+target_ids = torch.randint(0, 50304, (4, 256))
+logits, loss = model(input_ids, targets=target_ids)
+loss.backward()
+
+# Generation
+model.eval()
+with torch.no_grad():
+    prompt = torch.tensor([[1, 2, 3]], dtype=torch.long)
+    generated = model.generate(prompt, max_new_tokens=50, temperature=0.8)
+```

@@ -1,0 +1,666 @@
+---
+title: 'Troubleshooting'
+description: 'Common issues and solutions when training with nanoGPT'
+---
+
+# Troubleshooting
+
+This guide covers common issues you may encounter when using nanoGPT, along with solutions and workarounds.
+
+## PyTorch 2.0 Compile Issues
+
+### Issue: Compilation Errors
+
+**Error message:**
+```
+RuntimeError: Unsupported platform for torch.compile()
+```
+
+**Cause**: PyTorch 2.0 `torch.compile()` is not available on all platforms (notably Windows).
+
+**Solution**:
+
+Disable compilation with the `--compile=False` flag:
+
+```bash
+python train.py --compile=False
+```
+
+Or set it in your config file:
+
+```python
+compile = False
+```
+
+<Note>
+Disabling compilation will slow down training but ensure compatibility. The code will run in standard PyTorch eager mode.
+</Note>
+
+### Issue: Compilation Takes Too Long
+
+**Symptom**: Model compilation hangs for more than 5 minutes
+
+**Solutions**:
+
+1. **First run is always slow**: Compilation can take 1-2 minutes on first run. Be patient.
+
+2. **Reduce model complexity**: Smaller models compile faster:
+```bash
+python train.py --n_layer=6 --n_head=6 --n_embd=512
+```
+
+3. **Check GPU memory**: Compilation requires additional memory. If memory is tight, compilation may fail or hang.
+
+4. **Disable compilation for debugging**: Use `--compile=False` during development, enable for production runs.
+
+<Warning>
+The first compilation of a model takes about a minute. This is expected behavior. Subsequent iterations will be much faster (~135ms vs ~250ms per iteration).
+</Warning>
+
+## Out of Memory (OOM) Errors
+
+### Issue: CUDA Out of Memory
+
+**Error message:**
+```
+RuntimeError: CUDA out of memory. Tried to allocate X.XX GiB
+```
+
+**Solutions (in order of effectiveness)**:
+
+1. **Reduce block_size** (most effective):
+```bash
+python train.py --block_size=512  # down from 1024
+```
+Memory usage scales as O(block_size²) due to attention.
+
+2. **Reduce batch_size**:
+```bash
+python train.py --batch_size=8  # down from 12
+```
+
+3. **Increase gradient_accumulation_steps** to maintain effective batch size:
+```bash
+python train.py --batch_size=8 --gradient_accumulation_steps=10
+```
+
+4. **Reduce model size**:
+```bash
+python train.py --n_layer=6 --n_head=6 --n_embd=512
+```
+
+5. **Use smaller precision** (if not already):
+```bash
+python train.py --dtype=float16
+```
+
+<Accordion title="Memory Usage Formula">
+Approximate GPU memory usage:
+
+```
+Memory ≈ 4 × params + batch_size × block_size² × n_layer × n_embd × 4 bytes
+```
+
+The attention mechanism's O(block_size²) scaling dominates memory usage.
+</Accordion>
+
+### Issue: OOM During Evaluation
+
+**Symptom**: Training succeeds but OOM occurs during validation
+
+**Cause**: Evaluation processes more batches without gradient accumulation
+
+**Solution**:
+
+Reduce `eval_iters`:
+```bash
+python train.py --eval_iters=20  # down from 200
+```
+
+<Tip>
+For machines with limited memory, use `--eval_iters=20 --eval_interval=500` to evaluate less frequently with fewer iterations.
+</Tip>
+
+## Data Loading Issues
+
+### Issue: FileNotFoundError for train.bin
+
+**Error message:**
+```
+FileNotFoundError: [Errno 2] No such file or directory: 'data/shakespeare_char/train.bin'
+```
+
+**Cause**: Dataset not prepared
+
+**Solution**:
+
+Run the data preparation script first:
+
+```bash
+# For Shakespeare character-level
+python data/shakespeare_char/prepare.py
+
+# For Shakespeare (BPE tokenization)
+python data/shakespeare/prepare.py
+
+# For OpenWebText (large download ~54GB)
+python data/openwebtext/prepare.py
+```
+
+<Note>
+Always run the corresponding `prepare.py` script before training on a dataset. This downloads and tokenizes the data into `train.bin` and `val.bin` files.
+</Note>
+
+### Issue: OpenWebText Download Fails
+
+**Symptom**: Network timeout or connection error during `prepare.py`
+
+**Solutions**:
+
+1. **Check internet connection**: OpenWebText is ~54GB
+
+2. **Resume interrupted download**: The HuggingFace datasets library supports resuming:
+```bash
+python data/openwebtext/prepare.py  # Just rerun
+```
+
+3. **Use alternative dataset**: Start with Shakespeare for testing:
+```bash
+python data/shakespeare/prepare.py
+python train.py config/train_shakespeare_char.py
+```
+
+## Platform-Specific Issues
+
+### macOS / Apple Silicon
+
+**Issue**: Slow performance on Mac
+
+**Solutions**:
+
+1. **Use MPS backend** (Metal Performance Shaders):
+```bash
+python train.py --device=mps
+```
+
+2. **Disable compilation**:
+```bash
+python train.py --device=mps --compile=False
+```
+
+3. **Use smaller model** for reasonable training times:
+```bash
+python train.py config/train_shakespeare_char.py \
+    --device=mps --compile=False \
+    --n_layer=4 --n_head=4 --n_embd=128
+```
+
+<Info>
+On Apple Silicon Macbooks, using `--device=mps` provides 2-3x speedup over CPU. Make sure you have a recent PyTorch version with MPS support.
+</Info>
+
+### CPU-Only Training
+
+**Issue**: Extremely slow training on CPU
+
+**Solution**:
+
+Use reduced configuration and disable features that require CUDA:
+
+```bash
+python train.py config/train_shakespeare_char.py \
+    --device=cpu \
+    --compile=False \
+    --eval_iters=20 \
+    --log_interval=1 \
+    --block_size=64 \
+    --batch_size=12 \
+    --n_layer=4 \
+    --n_head=4 \
+    --n_embd=128 \
+    --max_iters=2000 \
+    --lr_decay_iters=2000 \
+    --dropout=0.0
+```
+
+<Warning>
+CPU training is extremely slow and only recommended for testing or learning purposes. For serious training, use a GPU or cloud GPU instances.
+</Warning>
+
+### Windows Issues
+
+**Issue**: Various platform compatibility errors
+
+**Common solutions**:
+
+1. **Disable compilation** (most common):
+```bash
+python train.py --compile=False
+```
+
+2. **Use WSL2**: For better compatibility, use Windows Subsystem for Linux:
+```bash
+wsl --install
+# Then install CUDA in WSL2 and run nanoGPT there
+```
+
+3. **Check path separators**: Use forward slashes or raw strings:
+```python
+data_dir = 'data/shakespeare_char'  # Works on Windows
+```
+
+## Distributed Training Issues
+
+### Issue: DDP Hangs at Initialization
+
+**Symptom**: Training script starts but hangs with no output
+
+**Cause**: Nodes cannot communicate
+
+**Solutions**:
+
+1. **Verify network connectivity**:
+```bash
+ping <master_node_ip>
+telnet <master_node_ip> <master_port>
+```
+
+2. **Check firewall settings**: Ensure master_port is open
+
+3. **Try different port**:
+```bash
+torchrun --master_port=29500 ...  # instead of default 1234
+```
+
+4. **Enable NCCL debugging**:
+```bash
+export NCCL_DEBUG=INFO
+torchrun ...
+```
+
+5. **Verify GPU accessibility**:
+```bash
+nvidia-smi  # Should show all GPUs
+```
+
+<Accordion title="NCCL Debugging Steps">
+1. Set `export NCCL_DEBUG=INFO` for detailed logs
+2. Check that all GPUs are visible: `echo $CUDA_VISIBLE_DEVICES`
+3. Verify network interface: `export NCCL_SOCKET_IFNAME=eth0`
+4. Test with single GPU first: `--nproc_per_node=1`
+5. Increase timeout: `export NCCL_TIMEOUT=7200000`
+</Accordion>
+
+### Issue: NCCL Timeout
+
+**Error message:**
+```
+RuntimeError: NCCL timeout in watchdog
+```
+
+**Solutions**:
+
+1. **Increase timeout**:
+```bash
+export NCCL_TIMEOUT=7200000  # 2 hours in milliseconds
+torchrun ...
+```
+
+2. **Disable InfiniBand** if not available:
+```bash
+export NCCL_IB_DISABLE=1
+torchrun ...
+```
+
+3. **Check network speed**: Use iperf3 to benchmark:
+```bash
+# On master
+iperf3 -s
+# On worker
+iperf3 -c <master_ip>
+```
+
+4. **Reduce communication frequency**: Increase gradient accumulation:
+```bash
+python train.py --gradient_accumulation_steps=10
+```
+
+### Issue: Multi-Node Training Very Slow
+
+**Symptom**: Training proceeds but much slower than single-node
+
+**Cause**: Poor network bandwidth
+
+**Solutions**:
+
+1. **Check if using Ethernet without IB disabled**:
+```bash
+export NCCL_IB_DISABLE=1  # Required for non-InfiniBand
+torchrun ...
+```
+
+2. **Verify network bandwidth**:
+```bash
+iperf3 -c <master_ip> -t 60
+```
+Should show >10 Gb/s for reasonable multi-node performance
+
+3. **Consider single-node with gradient accumulation**:
+```bash
+# Instead of 2 nodes with batch_size=12
+# Use 1 node with doubled gradient accumulation
+python train.py --gradient_accumulation_steps=10  # double it
+```
+
+<Warning>
+Multi-node training without InfiniBand will be significantly slower. If you see poor scaling, it's likely a network bottleneck. Use `NCCL_IB_DISABLE=1` if you don't have InfiniBand.
+</Warning>
+
+## Model Loading Issues
+
+### Issue: Checkpoint Loading Fails
+
+**Error message:**
+```
+KeyError: 'model' or RuntimeError: Error loading state_dict
+```
+
+**Solutions**:
+
+1. **Check checkpoint path**:
+```bash
+ls out-shakespeare-char/ckpt.pt  # Verify file exists
+```
+
+2. **Remove '_orig_mod.' prefix** (handled automatically in code):
+```python
+# Code already handles this
+unwanted_prefix = '_orig_mod.'
+for k,v in list(state_dict.items()):
+    if k.startswith(unwanted_prefix):
+        state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+```
+
+3. **Ensure matching model architecture**: Can't load checkpoint with different n_layer, n_head, etc.
+
+4. **Try fresh start**: If checkpoint is corrupted:
+```bash
+rm out-shakespeare-char/ckpt.pt
+python train.py --init_from=scratch  # Restart from scratch
+```
+
+### Issue: GPT-2 Checkpoint Loading Fails
+
+**Error message:**
+```
+ImportError: No module named 'transformers'
+```
+
+**Solution**:
+
+Install transformers library:
+```bash
+pip install transformers
+```
+
+<Note>
+The `transformers` library is only needed when loading pretrained GPT-2 checkpoints with `--init_from=gpt2`. It's not required for training from scratch.
+</Note>
+
+## Loss and Training Issues
+
+### Issue: Loss is NaN
+
+**Symptom**: Training starts but loss becomes NaN after a few iterations
+
+**Causes and solutions**:
+
+1. **Learning rate too high**:
+```bash
+python train.py --learning_rate=3e-4  # reduce from 6e-4
+```
+
+2. **Mixed precision instability**: Try bfloat16 or float32:
+```bash
+python train.py --dtype=bfloat16  # more stable than float16
+```
+
+3. **Gradient explosion**: Ensure gradient clipping is enabled:
+```bash
+python train.py --grad_clip=1.0  # should be default
+```
+
+4. **Bad checkpoint**: Start fresh:
+```bash
+python train.py --init_from=scratch
+```
+
+### Issue: Loss Not Decreasing
+
+**Symptom**: Loss stays constant or barely decreases
+
+**Solutions**:
+
+1. **Check learning rate**: May be too low:
+```bash
+python train.py --learning_rate=6e-4  # GPT-2 default
+```
+
+2. **Verify data loading**: Check that train.bin has data:
+```bash
+ls -lh data/shakespeare_char/train.bin  # Should be >0 bytes
+```
+
+3. **Check model is training**:
+```python
+# Ensure model.train() is called (automatic in train.py)
+```
+
+4. **Verify gradient flow**: Check for frozen layers or zero gradients
+
+5. **Increase model capacity**: Model may be too small:
+```bash
+python train.py --n_layer=12 --n_head=12 --n_embd=768
+```
+
+<Tip>
+For Shakespeare character-level, expect validation loss around 1.47 after ~3 minutes on an A100. If loss is significantly higher, check your configuration.
+</Tip>
+
+## Sampling Issues
+
+### Issue: Poor Quality Samples
+
+**Symptom**: Generated text is gibberish or repetitive
+
+**Solutions**:
+
+1. **Train longer**: Model may not be converged yet
+```bash
+python train.py --max_iters=5000  # increase training iterations
+```
+
+2. **Check validation loss**: Should be &lt;2.0 for reasonable quality
+
+3. **Adjust sampling parameters**:
+```bash
+# More diverse (higher temperature)
+python sample.py --temperature=1.0 --top_k=200
+
+# More conservative (lower temperature)  
+python sample.py --temperature=0.8 --top_k=40
+```
+
+4. **Use correct checkpoint**:
+```bash
+python sample.py --out_dir=out-shakespeare-char  # Match training out_dir
+```
+
+5. **Sample from pretrained model** to verify sampling works:
+```bash
+python sample.py --init_from=gpt2 --start="Hello world"
+```
+
+### Issue: Sampling is Very Slow
+
+**Symptom**: Generation takes multiple seconds per token
+
+**Solutions**:
+
+1. **Ensure model.eval() mode** (automatic in sample.py)
+
+2. **Use compilation** for faster inference:
+```bash
+# Modify sample.py to add compilation
+model = torch.compile(model)
+```
+
+3. **Reduce context window**: Sampling gets slower with longer context
+
+4. **Use GPU instead of CPU**:
+```bash
+python sample.py --device=cuda  # much faster than CPU
+```
+
+## Dependency Issues
+
+### Issue: Missing Dependencies
+
+**Error messages:**
+```
+ModuleNotFoundError: No module named 'tiktoken'
+ModuleNotFoundError: No module named 'wandb'
+```
+
+**Solution**:
+
+Install all dependencies:
+```bash
+pip install torch numpy transformers datasets tiktoken wandb tqdm
+```
+
+Or install individually:
+```bash
+pip install tiktoken  # OpenAI's BPE tokenizer
+pip install wandb     # Logging (optional)
+pip install datasets  # HuggingFace datasets (for OpenWebText)
+```
+
+<Info>
+Not all dependencies are required for all use cases:
+- `tiktoken`: Required for GPT-2 BPE tokenization
+- `transformers`: Only needed for loading pretrained GPT-2
+- `datasets`: Only needed for OpenWebText
+- `wandb`: Optional logging
+</Info>
+
+## Performance Issues
+
+### Issue: Training Slower Than Expected
+
+**Symptom**: Iteration time much higher than benchmarks (>500ms on A100)
+
+**Diagnostics**:
+
+1. **Check if compilation is enabled**:
+```bash
+python train.py  # Should see "compiling the model..." message
+```
+
+2. **Verify Flash Attention is active**: Look for no warning about slow attention
+
+3. **Check GPU utilization**:
+```bash
+nvidia-smi  # Should show >90% GPU utilization
+```
+
+4. **Verify dtype**:
+```bash
+python train.py --dtype=bfloat16  # A100 optimal
+```
+
+5. **Check MFU**: Should be >40% for single-node training
+
+**Solutions**:
+
+- Enable compilation: `--compile=True`
+- Use bfloat16: `--dtype=bfloat16`
+- Increase batch size if memory allows: `--batch_size=16`
+- Update PyTorch: `pip install --upgrade torch`
+
+<Accordion title="Expected Performance Benchmarks">
+**GPT-2 (124M) on A100 40GB:**
+- Iteration time: ~135ms with compilation
+- MFU: ~45%
+- Tokens/second: ~3.5M (single GPU)
+
+**Shakespeare on A100:**
+- Training time: ~3 minutes
+- Final validation loss: ~1.47
+
+If your performance is significantly worse, check compilation and dtype settings.
+</Accordion>
+
+## WandB Logging Issues
+
+### Issue: WandB Not Logging
+
+**Symptom**: No data appears in WandB dashboard
+
+**Solutions**:
+
+1. **Login to WandB**:
+```bash
+wandb login
+```
+
+2. **Enable logging**:
+```bash
+python train.py --wandb_log=True --wandb_project=my-project
+```
+
+3. **Check master process**: Only rank 0 logs (expected)
+
+4. **Verify internet connection**: WandB requires network access
+
+5. **Check for errors**: Look for WandB error messages in output
+
+<Note>
+WandB is optional. Training works fine without it. Use `--wandb_log=False` to disable.
+</Note>
+
+## Getting Help
+
+If you encounter issues not covered here:
+
+1. **Check GitHub Issues**: [github.com/karpathy/nanoGPT/issues](https://github.com/karpathy/nanoGPT/issues)
+2. **Join Discord**: #nanoGPT channel for community support
+3. **Enable verbose logging**: Use `--log_interval=1` for detailed progress
+4. **Try minimal config**: Test with Shakespeare character-level first
+5. **Provide full error message**: Include stack trace when asking for help
+
+## Quick Diagnostic Checklist
+
+When encountering issues, run through this checklist:
+
+- [ ] PyTorch 2.0+ installed: `python -c "import torch; print(torch.__version__)"`
+- [ ] CUDA available (if using GPU): `python -c "import torch; print(torch.cuda.is_available())"`
+- [ ] Data prepared: `ls data/shakespeare_char/train.bin`
+- [ ] Sufficient GPU memory: `nvidia-smi`
+- [ ] Compilation disabled on incompatible platforms: `--compile=False`
+- [ ] Correct device specified: `--device=cuda` or `--device=mps` or `--device=cpu`
+- [ ] Config file exists (if using): `ls config/train_shakespeare_char.py`
+- [ ] All dependencies installed: `pip list | grep -E 'torch|tiktoken|transformers'`
+
+## Common Error Messages Reference
+
+| Error | Quick Fix |
+|-------|-----------|
+| `CUDA out of memory` | `--block_size=512 --batch_size=8` |
+| `Unsupported platform for torch.compile()` | `--compile=False` |
+| `FileNotFoundError: train.bin` | Run `python data/<dataset>/prepare.py` |
+| `NCCL timeout` | `export NCCL_IB_DISABLE=1` |
+| `ModuleNotFoundError: tiktoken` | `pip install tiktoken` |
+| `Loss is NaN` | `--learning_rate=3e-4 --dtype=bfloat16` |
+| `RuntimeError: expected scalar type` | `--dtype=float32` |
+| `Address already in use` | `--master_port=<different port>` |

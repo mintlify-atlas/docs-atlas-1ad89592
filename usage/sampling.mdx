@@ -1,0 +1,175 @@
+---
+title: 'Sampling and Inference'
+description: 'Generate text from trained or pretrained models'
+---
+
+## Overview
+
+The `sample.py` script allows you to generate text from either pretrained GPT-2 models released by OpenAI or from models you've trained yourself. It supports various sampling strategies and configuration options.
+
+## Basic Usage
+
+### Sample from Pretrained GPT-2
+
+Sample from OpenAI's largest available model:
+
+```bash
+python sample.py \
+    --init_from=gpt2-xl \
+    --start="What is the answer to life, the universe, and everything?" \
+    --num_samples=5 --max_new_tokens=100
+```
+
+<Note>
+Available GPT-2 variants: `gpt2`, `gpt2-medium`, `gpt2-large`, `gpt2-xl`
+</Note>
+
+### Sample from Your Trained Model
+
+If you trained or finetuned a model, use the `--out_dir` parameter:
+
+<CodeGroup>
+
+```bash Shakespeare
+python sample.py --out_dir=out-shakespeare-char
+```
+
+```bash Custom Directory
+python sample.py --out_dir=out-shakespeare
+```
+
+```bash With CPU
+python sample.py --out_dir=out-shakespeare-char --device=cpu
+```
+
+</CodeGroup>
+
+## Configuration Parameters
+
+The `sample.py` script accepts the following parameters:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `init_from` | `resume` | Either `resume` (from out_dir) or a GPT-2 variant (e.g., `gpt2-xl`) |
+| `out_dir` | `out` | Directory containing model checkpoint (ignored if init_from is not 'resume') |
+| `start` | `\n` | Starting text prompt for generation |
+| `num_samples` | `10` | Number of samples to generate |
+| `max_new_tokens` | `500` | Number of tokens to generate per sample |
+| `temperature` | `0.8` | Sampling temperature (1.0 = no change, &lt;1.0 = less random, &gt;1.0 = more random) |
+| `top_k` | `200` | Retain only top_k most likely tokens, clamp others to 0 probability |
+| `seed` | `1337` | Random seed for reproducibility |
+| `device` | `cuda` | Device to run on (`cpu`, `cuda`, `cuda:0`, `cuda:1`, etc.) |
+| `dtype` | `bfloat16`/`float16` | Data type for computation |
+| `compile` | `False` | Use PyTorch 2.0 to compile the model for faster inference |
+
+<Tip>
+Use command line arguments to override any of these parameters:
+```bash
+python sample.py --temperature=1.2 --top_k=100 --num_samples=3
+```
+</Tip>
+
+## Advanced Features
+
+### Using a Prompt from File
+
+You can provide a prompt from a text file:
+
+```bash
+python sample.py --start=FILE:prompt.txt
+```
+
+### Temperature and Top-k Sampling
+
+Control the randomness and diversity of outputs:
+
+<CodeGroup>
+
+```bash Conservative Sampling
+# Lower temperature = more focused, deterministic
+python sample.py --temperature=0.5 --top_k=50
+```
+
+```bash Creative Sampling
+# Higher temperature = more random, creative
+python sample.py --temperature=1.2 --top_k=300
+```
+
+```bash Balanced Sampling
+# Default balanced settings
+python sample.py --temperature=0.8 --top_k=200
+```
+
+</CodeGroup>
+
+## Example Output
+
+After finetuning on Shakespeare and sampling, you might see output like:
+
+```
+THEODORE:
+Thou shalt sell me to the highest bidder: if I die,
+I sell thee to the first; if I go mad,
+I sell thee to the second; if I
+lie, I sell thee to the third; if I slay,
+I sell thee to the fourth: so buy or sell,
+I tell thee again, thou shalt not sell my
+possession.
+
+JULIET:
+And if thou steal, thou shalt not sell thyself.
+
+THEODORE:
+I do not steal; I sell the stolen goods.
+---------------
+```
+
+## How It Works
+
+<Steps>
+  <Step title="Model Loading">
+    The script loads either a checkpoint from `out_dir` or a pretrained GPT-2 model from the specified variant.
+  </Step>
+
+  <Step title="Tokenizer Setup">
+    If a `meta.pkl` file exists in the dataset directory, it uses the custom tokenizer. Otherwise, it defaults to GPT-2's BPE tokenizer (tiktoken).
+  </Step>
+
+  <Step title="Prompt Encoding">
+    The starting text is encoded into token IDs using the appropriate tokenizer.
+  </Step>
+
+  <Step title="Generation">
+    The model generates new tokens autoregressively using the `generate()` method with the specified temperature and top_k parameters.
+  </Step>
+
+  <Step title="Decoding">
+    Generated token IDs are decoded back to text and printed to the console.
+  </Step>
+</Steps>
+
+<Warning>
+If running on CPU, make sure to add `--device=cpu` flag. On Apple Silicon Macs, use `--device=mps` for GPU acceleration.
+</Warning>
+
+## Troubleshooting
+
+### PyTorch 2.0 Compile Issues
+
+If you encounter errors related to `torch.compile`, disable compilation:
+
+```bash
+python sample.py --compile=False
+```
+
+### Out of Memory
+
+If you run out of memory, try:
+- Using a smaller model variant
+- Reducing `max_new_tokens`
+- Reducing `num_samples`
+- Using CPU instead of GPU
+
+```bash
+python sample.py --init_from=gpt2 --max_new_tokens=100 --num_samples=1
+```

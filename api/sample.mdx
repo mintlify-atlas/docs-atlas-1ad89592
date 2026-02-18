@@ -1,0 +1,236 @@
+---
+title: "sample.py"
+description: "Generate text samples from trained nanoGPT models"
+---
+
+## Overview
+
+The `sample.py` script generates text samples from a trained model. It supports both loading custom trained checkpoints and using pretrained OpenAI GPT-2 models.
+
+## Usage
+
+<CodeGroup>
+```bash Sample from Trained Model
+python sample.py --out_dir=out
+```
+
+```bash Sample from GPT-2
+python sample.py --init_from=gpt2
+```
+
+```bash Sample from GPT-2 XL
+python sample.py --init_from=gpt2-xl --num_samples=5
+```
+
+```bash Custom Temperature and Length
+python sample.py \
+  --temperature=1.0 \
+  --max_new_tokens=1000 \
+  --top_k=300
+```
+
+```bash From File Prompt
+python sample.py --start="FILE:prompt.txt"
+```
+</CodeGroup>
+
+## Configuration Parameters
+
+### Model Initialization
+
+<ParamField path="init_from" type="string" default="resume">
+  Model to sample from:
+  - `resume`: Load from checkpoint in `out_dir`
+  - `gpt2`: OpenAI GPT-2 small (124M parameters)
+  - `gpt2-medium`: OpenAI GPT-2 medium (350M parameters)
+  - `gpt2-large`: OpenAI GPT-2 large (774M parameters)
+  - `gpt2-xl`: OpenAI GPT-2 XL (1.5B parameters)
+</ParamField>
+
+<ParamField path="out_dir" type="string" default="out">
+  Directory containing the checkpoint file (`ckpt.pt`). Only used when `init_from=resume`.
+</ParamField>
+
+### Generation Parameters
+
+<ParamField path="start" type="string" default="\n">
+  The prompt to start generation from. Can be:
+  - A string: Direct text prompt (e.g., `"Once upon a time"`)
+  - `<|endoftext|>`: GPT-2 end-of-text token
+  - `FILE:path/to/file.txt`: Read prompt from file
+</ParamField>
+
+<ParamField path="num_samples" type="integer" default="10">
+  Number of samples to generate
+</ParamField>
+
+<ParamField path="max_new_tokens" type="integer" default="500">
+  Maximum number of tokens to generate per sample
+</ParamField>
+
+<ParamField path="temperature" type="float" default="0.8">
+  Sampling temperature:
+  - `1.0`: No change to logits (standard sampling)
+  - `< 1.0`: Less random, more focused (e.g., 0.5 for more conservative outputs)
+  - `> 1.0`: More random, more creative (e.g., 1.2 for more diverse outputs)
+  - `0.0`: Greedy decoding (always pick most likely token)
+</ParamField>
+
+<ParamField path="top_k" type="integer" default="200">
+  Top-k filtering: retain only the top k most likely tokens, set others to zero probability.
+  Set to `None` or `0` to disable top-k filtering.
+</ParamField>
+
+### System Parameters
+
+<ParamField path="seed" type="integer" default="1337">
+  Random seed for reproducibility
+</ParamField>
+
+<ParamField path="device" type="string" default="cuda">
+  Device to use: `cpu`, `cuda`, `cuda:0`, `cuda:1`, or `mps` on macOS
+</ParamField>
+
+<ParamField path="dtype" type="string" default="bfloat16 or float16">
+  Data type for inference: `float32`, `bfloat16`, or `float16`.
+  Default is `bfloat16` if supported, otherwise `float16`.
+</ParamField>
+
+<ParamField path="compile" type="boolean" default="false">
+  Use PyTorch 2.0 `torch.compile()` to optimize the model. Disabled by default for sampling.
+</ParamField>
+
+## Encoding and Decoding
+
+The script automatically handles tokenization:
+
+- **For custom trained models**: If a `meta.pkl` file exists in the dataset directory, it uses the custom encoder/decoder from training
+- **For GPT-2 models**: Uses the tiktoken GPT-2 encoder
+
+<Note>
+When loading a checkpoint with `init_from=resume`, the script attempts to find the `meta.pkl` file from the original dataset used during training.
+</Note>
+
+## Examples
+
+### Generate Shakespeare-style Text
+
+<CodeGroup>
+```bash Train First
+python train.py \
+  --dataset=shakespeare_char \
+  --max_iters=5000 \
+  --out_dir=out-shakespeare
+```
+
+```bash Then Sample
+python sample.py \
+  --out_dir=out-shakespeare \
+  --start="ROMEO:" \
+  --num_samples=3 \
+  --max_new_tokens=200
+```
+</CodeGroup>
+
+### Generate Code with GPT-2
+
+```bash
+python sample.py \
+  --init_from=gpt2-xl \
+  --start="def fibonacci(n):\n    " \
+  --temperature=0.5 \
+  --max_new_tokens=300 \
+  --num_samples=1
+```
+
+### Creative Story Generation
+
+```bash
+python sample.py \
+  --init_from=gpt2-large \
+  --start="In a distant galaxy far away," \
+  --temperature=1.2 \
+  --top_k=300 \
+  --max_new_tokens=800 \
+  --num_samples=5
+```
+
+### Use Prompt from File
+
+<CodeGroup>
+```bash Create Prompt File
+echo "Write a technical blog post about neural networks:" > prompt.txt
+```
+
+```bash Generate
+python sample.py \
+  --init_from=gpt2-xl \
+  --start="FILE:prompt.txt" \
+  --temperature=0.7 \
+  --max_new_tokens=1000
+```
+</CodeGroup>
+
+### Deterministic Generation
+
+```bash
+python sample.py \
+  --init_from=gpt2 \
+  --start="The capital of France is" \
+  --temperature=0.0 \
+  --seed=42 \
+  --num_samples=1
+```
+
+<Note>
+With `temperature=0.0`, the model performs greedy decoding and will always generate the same output for the same prompt and seed.
+</Note>
+
+## Temperature Guide
+
+Choosing the right temperature depends on your use case:
+
+| Temperature | Use Case | Behavior |
+|-------------|----------|----------|
+| 0.0 | Deterministic, factual | Always picks most likely token (greedy) |
+| 0.3 - 0.5 | Code, technical writing | Very focused, low randomness |
+| 0.7 - 0.8 | General text, articles | Balanced creativity and coherence |
+| 0.8 - 1.0 | Creative writing | More diverse, less predictable |
+| 1.0+ | Experimental, poetry | High creativity, may be less coherent |
+
+## Top-K Filtering
+
+Top-k filtering helps prevent the model from sampling very unlikely tokens:
+
+- **Lower values (50-100)**: More focused, less diverse
+- **Medium values (200-300)**: Balanced approach (recommended)
+- **Higher values (500+)**: More diverse but may include unlikely tokens
+- **Disabled (0)**: No filtering, sample from full distribution
+
+<Warning>
+Very high temperature combined with no top-k filtering can produce incoherent text.
+</Warning>
+
+## Output Format
+
+The script generates samples sequentially and separates them with:
+
+```
+[Generated text sample 1]
+---------------
+[Generated text sample 2]
+---------------
+...
+```
+
+## Performance Optimization
+
+- **Mixed Precision**: Using `bfloat16` or `float16` reduces memory usage
+- **torch.compile()**: Can be enabled for faster generation, but compilation overhead makes it less useful for short generation sessions
+- **Batch Generation**: The script generates one sample at a time. For production use, consider batching multiple prompts together
+
+## See Also
+
+- [Training Script](/api/train) - Train your own models
+- [Model Architecture](/model/architecture) - GPT model implementation
+- [Benchmark Script](/api/bench) - Performance benchmarking

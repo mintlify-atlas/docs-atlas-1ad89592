@@ -1,0 +1,319 @@
+---
+title: 'Performance Optimization'
+description: 'Advanced techniques to maximize training speed and efficiency in nanoGPT'
+---
+
+# Performance Optimization
+
+This guide covers advanced optimization techniques to maximize training performance in nanoGPT, including PyTorch 2.0 compilation, Flash Attention, mixed precision training, and profiling strategies.
+
+## PyTorch 2.0 Compile
+
+PyTorch 2.0's `torch.compile()` provides significant speedups with just one line of code. nanoGPT uses this by default.
+
+### Enabling Compilation
+
+In `train.py`, compilation is controlled by the `compile` flag:
+
+```python
+compile = True  # use PyTorch 2.0 to compile the model to be faster
+```
+
+When enabled, the model is compiled after initialization:
+
+```python
+if compile:
+    print("compiling the model... (takes a ~minute)")
+    unoptimized_model = model
+    model = torch.compile(model)  # requires PyTorch 2.0
+```
+
+<Note>
+The first compilation takes about a minute, but subsequent iterations are significantly faster. On typical workloads, compilation reduces iteration time from ~250ms to ~135ms.
+</Note>
+
+### Performance Benefits
+
+- **~46% speedup**: Iteration time drops from 250ms to 135ms on A100 GPUs
+- **Zero code changes**: Single line of code provides automatic optimizations
+- **Graph optimization**: PyTorch compiles the model into optimized kernels
+
+### Disabling Compilation
+
+On platforms where PyTorch 2.0 is not available (e.g., Windows), disable compilation:
+
+```bash
+python train.py --compile=False
+```
+
+<Warning>
+Compilation is not yet available on all platforms. If you encounter compilation errors, disable it with `--compile=False`. This will slow down training but ensure compatibility.
+</Warning>
+
+## Flash Attention
+
+Flash Attention uses optimized CUDA kernels for memory-efficient attention computation. nanoGPT automatically detects and uses it when available.
+
+### Automatic Detection
+
+In `model.py`, the `CausalSelfAttention` class checks for Flash Attention support:
+
+```python
+# flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
+self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+if not self.flash:
+    print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+```
+
+### Implementation
+
+When Flash Attention is available, it's used in the forward pass:
+
+```python
+if self.flash:
+    # efficient attention using Flash Attention CUDA kernels
+    y = torch.nn.functional.scaled_dot_product_attention(
+        q, k, v, 
+        attn_mask=None, 
+        dropout_p=self.dropout if self.training else 0, 
+        is_causal=True
+    )
+else:
+    # manual implementation of attention
+    att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+    att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+    att = F.softmax(att, dim=-1)
+    att = self.attn_dropout(att)
+    y = att @ v
+```
+
+<Tip>
+Flash Attention provides both memory efficiency and speed improvements. Make sure you're using PyTorch >= 2.0 to take advantage of it.
+</Tip>
+
+### Benefits
+
+- **Memory efficient**: Reduces memory usage during attention computation
+- **Faster execution**: Optimized CUDA kernels outperform manual implementation
+- **Automatic fallback**: Uses manual implementation if Flash Attention is unavailable
+
+## Mixed Precision Training
+
+nanoGPT supports automatic mixed precision (AMP) training with bfloat16 or float16 data types.
+
+### Data Type Configuration
+
+The dtype is automatically selected based on hardware capabilities:
+
+```python
+dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
+```
+
+Override with command-line arguments:
+
+```bash
+# Use bfloat16 (recommended for A100 GPUs)
+python train.py --dtype=bfloat16
+
+# Use float16 (with automatic gradient scaling)
+python train.py --dtype=float16
+
+# Use full precision (slower, for debugging)
+python train.py --dtype=float32
+```
+
+### Autocast Context
+
+Training uses automatic mixed precision via `torch.amp.autocast`:
+
+```python
+ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
+ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+
+# In training loop
+with ctx:
+    logits, loss = model(X, Y)
+```
+
+### Gradient Scaling
+
+For float16 training, a GradScaler prevents gradient underflow:
+
+```python
+scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+
+# In training loop
+scaler.scale(loss).backward()
+if grad_clip != 0.0:
+    scaler.unscale_(optimizer)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+scaler.step(optimizer)
+scaler.update()
+```
+
+<Info>
+bfloat16 is preferred over float16 on modern GPUs (A100+) because it has better numerical stability and doesn't require gradient scaling.
+</Info>
+
+### Choosing the Right Precision
+
+| Precision | Speed | Memory | Stability | Use Case |
+|-----------|-------|--------|-----------|----------|
+| float32 | Baseline | High | Excellent | Debugging, CPU training |
+| float16 | ~2x faster | ~2x less | Good* | Older GPUs (V100) |
+| bfloat16 | ~2x faster | ~2x less | Excellent | Modern GPUs (A100+) |
+
+*Requires gradient scaling
+
+## TF32 Acceleration
+
+nanoGPT enables TF32 (TensorFloat-32) for faster matmul operations on Ampere GPUs:
+
+```python
+torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
+torch.backends.cudnn.allow_tf32 = True        # allow tf32 on cudnn
+```
+
+<Note>
+TF32 provides ~2x speedup on A100 GPUs with minimal accuracy impact. It's automatically enabled and doesn't require configuration.
+</Note>
+
+## Profiling and Benchmarking
+
+### Using bench.py
+
+nanoGPT includes `bench.py` for simple benchmarking:
+
+```bash
+python bench.py
+```
+
+This runs a simplified training loop and reports:
+- Time per iteration (milliseconds)
+- Model FLOPs Utilization (MFU) percentage
+
+### PyTorch Profiler
+
+For detailed profiling, use the built-in profiler:
+
+```bash
+python bench.py --profile=True
+```
+
+This generates TensorBoard traces in `./bench_log`:
+
+```python
+with torch.profiler.profile(
+    activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+    schedule=torch.profiler.schedule(wait=5, warmup=5, active=5, repeat=1),
+    on_trace_ready=torch.profiler.tensorboard_trace_handler('./bench_log'),
+    with_flops=True,
+) as prof:
+    # Training loop
+    prof.step()
+```
+
+View results in TensorBoard:
+
+```bash
+tensorboard --logdir=./bench_log
+```
+
+<Accordion title="Profiler Configuration Options">
+- `wait`: Number of steps to skip before profiling
+- `warmup`: Number of warmup steps for accurate measurements
+- `active`: Number of steps to actively profile
+- `with_flops`: Calculate FLOPs metrics
+- `profile_memory`: Track memory usage (adds overhead)
+- `with_stack`: Include stack traces (adds overhead)
+</Accordion>
+
+### Model FLOPs Utilization (MFU)
+
+nanoGPT calculates MFU to measure hardware efficiency:
+
+```python
+def estimate_mfu(self, fwdbwd_per_iter, dt):
+    """estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS"""
+    N = self.get_num_params()
+    cfg = self.config
+    L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd//cfg.n_head, cfg.block_size
+    flops_per_token = 6*N + 12*L*H*Q*T
+    flops_per_fwdbwd = flops_per_token * T
+    flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
+    flops_achieved = flops_per_iter * (1.0/dt)
+    flops_promised = 312e12  # A100 GPU bfloat16 peak flops is 312 TFLOPS
+    mfu = flops_achieved / flops_promised
+    return mfu
+```
+
+Good MFU values:
+- **40-50%**: Excellent for language model training
+- **30-40%**: Good, typical for distributed training
+- **&lt;30%**: Bottlenecked by data loading or communication
+
+<Tip>
+MFU is reported during training. Monitor it to ensure your training is compute-bound rather than I/O or communication-bound.
+</Tip>
+
+## Fused AdamW Optimizer
+
+nanoGPT automatically uses the fused AdamW implementation when available:
+
+```python
+fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+use_fused = fused_available and device_type == 'cuda'
+extra_args = dict(fused=True) if use_fused else dict()
+optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+```
+
+The fused version provides ~10-15% speedup by reducing kernel launches.
+
+## Memory Optimization Tips
+
+### Gradient Accumulation
+
+Simulate larger batch sizes without OOM errors:
+
+```python
+gradient_accumulation_steps = 5 * 8  # simulate 40x larger batch
+```
+
+### Reducing Model Size
+
+If running out of memory, reduce model dimensions:
+
+```bash
+python train.py --n_layer=6 --n_head=6 --n_embd=512 --block_size=512
+```
+
+### Block Size (Context Length)
+
+Reducing context length quadratically reduces memory:
+
+```bash
+python train.py --block_size=512  # instead of default 1024
+```
+
+<Warning>
+Memory usage scales as O(batch_size × block_size²) due to attention. Reducing block_size has the largest memory impact.
+</Warning>
+
+## Best Practices
+
+1. **Always enable compilation**: Use `--compile=True` unless on unsupported platforms
+2. **Use bfloat16 on A100+**: Better stability than float16 without gradient scaling overhead
+3. **Enable gradient accumulation**: Allows larger effective batch sizes
+4. **Monitor MFU**: Aim for >40% on single-node training
+5. **Benchmark before large runs**: Use `bench.py` to validate configuration
+6. **Profile bottlenecks**: Use PyTorch profiler to identify performance issues
+
+## Performance Checklist
+
+- [ ] PyTorch 2.0 installed and compilation enabled
+- [ ] Flash Attention available (PyTorch >= 2.0)
+- [ ] Using bfloat16 on A100/H100 GPUs
+- [ ] TF32 enabled (automatic on Ampere+)
+- [ ] Fused AdamW optimizer detected
+- [ ] Gradient accumulation configured for large batch sizes
+- [ ] MFU > 40% on single-node training

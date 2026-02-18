@@ -1,0 +1,293 @@
+---
+title: 'GPTConfig'
+description: 'Configuration dataclass for the GPT model'
+icon: 'gear'
+---
+
+## Overview
+
+The `GPTConfig` dataclass defines all hyperparameters for configuring a GPT model. It provides sensible defaults based on the GPT-2 architecture while allowing full customization.
+
+```python
+@dataclass
+class GPTConfig:
+    block_size: int = 1024
+    vocab_size: int = 50304
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
+    dropout: float = 0.0
+    bias: bool = True
+```
+
+## Configuration Parameters
+
+<ParamField path="block_size" type="int" default="1024">
+  Maximum sequence length (context window) that the model can handle.
+  
+  - Determines the size of position embeddings
+  - Sequences longer than `block_size` will be truncated or chunked
+  - Standard GPT-2 uses 1024 tokens
+  
+  **Example:**
+  ```python
+  config = GPTConfig(block_size=512)  # Shorter context for memory efficiency
+  ```
+</ParamField>
+
+<ParamField path="vocab_size" type="int" default="50304">
+  Size of the vocabulary (number of unique tokens).
+  
+  - Default is 50304 (GPT-2's 50257 padded to nearest multiple of 64)
+  - Padding to multiples of 64 improves computational efficiency on GPUs
+  - Must match the tokenizer vocabulary size
+  
+  <Note>
+  The default value 50304 = 50257 (GPT-2 vocab) + 47 (padding to 64x)
+  </Note>
+  
+  **Example:**
+  ```python
+  config = GPTConfig(vocab_size=50257)  # Original GPT-2 vocab size
+  ```
+</ParamField>
+
+<ParamField path="n_layer" type="int" default="12">
+  Number of transformer blocks (layers) in the model.
+  
+  - More layers = more capacity but slower training/inference
+  - GPT-2: 12, GPT-2 Medium: 24, GPT-2 Large: 36, GPT-2 XL: 48
+  - Each layer contains one attention block and one MLP block
+  
+  **Example:**
+  ```python
+  config = GPTConfig(n_layer=6)  # Smaller model with 6 layers
+  ```
+</ParamField>
+
+<ParamField path="n_head" type="int" default="12">
+  Number of attention heads in multi-head attention.
+  
+  - Must divide `n_embd` evenly (head_dim = n_embd / n_head)
+  - More heads allow attending to different representation subspaces
+  - Standard configurations maintain head_dim = 64
+  
+  <Info>
+  The embedding dimension must be divisible by the number of heads. For example, with `n_embd=768` and `n_head=12`, each head has dimension 64.
+  </Info>
+  
+  **Example:**
+  ```python
+  config = GPTConfig(n_embd=768, n_head=12)  # 12 heads × 64 dim = 768
+  ```
+</ParamField>
+
+<ParamField path="n_embd" type="int" default="768">
+  Dimensionality of embeddings and hidden states.
+  
+  - Determines the model's representational capacity
+  - All token embeddings, position embeddings, and hidden states use this dimension
+  - GPT-2: 768, GPT-2 Medium: 1024, GPT-2 Large: 1280, GPT-2 XL: 1600
+  
+  **Example:**
+  ```python
+  config = GPTConfig(n_embd=512, n_head=8)  # Smaller model with 512-dim embeddings
+  ```
+</ParamField>
+
+<ParamField path="dropout" type="float" default="0.0">
+  Dropout probability applied to embeddings, attention, and residual connections.
+  
+  - Range: [0.0, 1.0] where 0.0 means no dropout
+  - Default is 0.0 (no dropout) which works well with modern training techniques
+  - Can help prevent overfitting on smaller datasets
+  
+  **Applied in:**
+  - Embedding dropout (after token + position embeddings)
+  - Attention dropout (on attention weights)
+  - Residual dropout (after attention and MLP projections)
+  
+  **Example:**
+  ```python
+  config = GPTConfig(dropout=0.1)  # 10% dropout for regularization
+  ```
+</ParamField>
+
+<ParamField path="bias" type="bool" default="True">
+  Whether to include bias terms in Linear layers and LayerNorm.
+  
+  - `True`: Includes bias (matches GPT-2, more parameters)
+  - `False`: No bias (slightly better and faster)
+  
+  <Note>
+  Setting `bias=False` can improve training speed and reduce memory usage with minimal impact on model quality. However, pretrained GPT-2 checkpoints require `bias=True`.
+  </Note>
+  
+  **Example:**
+  ```python
+  config = GPTConfig(bias=False)  # No bias for efficiency
+  ```
+</ParamField>
+
+## Preset Configurations
+
+### GPT-2 Model Variants
+
+The model supports loading pretrained GPT-2 configurations:
+
+<Tabs>
+  <Tab title="GPT-2">
+    ```python
+    config = GPTConfig(
+        n_layer=12,
+        n_head=12,
+        n_embd=768,
+        vocab_size=50257,
+        block_size=1024,
+        bias=True
+    )
+    # 124M parameters
+    ```
+  </Tab>
+  
+  <Tab title="GPT-2 Medium">
+    ```python
+    config = GPTConfig(
+        n_layer=24,
+        n_head=16,
+        n_embd=1024,
+        vocab_size=50257,
+        block_size=1024,
+        bias=True
+    )
+    # 350M parameters
+    ```
+  </Tab>
+  
+  <Tab title="GPT-2 Large">
+    ```python
+    config = GPTConfig(
+        n_layer=36,
+        n_head=20,
+        n_embd=1280,
+        vocab_size=50257,
+        block_size=1024,
+        bias=True
+    )
+    # 774M parameters
+    ```
+  </Tab>
+  
+  <Tab title="GPT-2 XL">
+    ```python
+    config = GPTConfig(
+        n_layer=48,
+        n_head=25,
+        n_embd=1600,
+        vocab_size=50257,
+        block_size=1024,
+        bias=True
+    )
+    # 1558M parameters
+    ```
+  </Tab>
+</Tabs>
+
+## Usage Examples
+
+### Creating a Custom Configuration
+
+```python
+from model import GPTConfig, GPT
+
+# Small model for experimentation
+config = GPTConfig(
+    block_size=256,      # Short context
+    vocab_size=50304,    # Standard vocab
+    n_layer=6,           # Fewer layers
+    n_head=6,            # Fewer heads
+    n_embd=384,          # Smaller embeddings
+    dropout=0.1,         # Some dropout
+    bias=False           # No bias for speed
+)
+
+model = GPT(config)
+print(f"Parameters: {model.get_num_params()/1e6:.2f}M")
+```
+
+### Loading Pretrained Configuration
+
+```python
+# Load GPT-2 with custom dropout
+model = GPT.from_pretrained('gpt2', override_args={'dropout': 0.1})
+```
+
+<Info>
+When loading pretrained models, only the `dropout` parameter can be overridden. All other parameters are fixed to match the checkpoint.
+</Info>
+
+### Configuration for Memory-Constrained Training
+
+```python
+# Smaller model that fits in limited GPU memory
+config = GPTConfig(
+    block_size=512,      # Half the standard context
+    n_layer=8,           # Fewer layers
+    n_head=8,            # Fewer heads
+    n_embd=512,          # Smaller embeddings
+    dropout=0.0,         # No dropout
+    bias=False           # Remove bias for memory savings
+)
+```
+
+## Configuration Validation
+
+The model performs validation on initialization:
+
+```python
+class GPT(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        # Validation in CausalSelfAttention
+        assert config.n_embd % config.n_head == 0
+```
+
+<Note>
+**Important constraints:**
+- `vocab_size` and `block_size` must be set (cannot be None)
+- `n_embd` must be divisible by `n_head`
+- All values must be positive integers (except `dropout` which is a float in [0, 1])
+</Note>
+
+## Best Practices
+
+### Choosing Model Size
+
+1. **Start small**: Begin with a small configuration for debugging
+2. **Scale gradually**: Increase `n_layer` and `n_embd` based on available compute
+3. **Maintain ratios**: Keep head dimension (n_embd / n_head) around 64
+4. **Consider memory**: Larger `block_size` significantly increases memory usage
+
+### Performance Optimization
+
+```python
+# Optimized configuration for training
+config = GPTConfig(
+    vocab_size=50304,    # Padded to 64x for efficiency
+    bias=False,          # Faster without bias
+    dropout=0.0,         # Skip dropout if not needed
+)
+```
+
+### Fine-tuning Configuration
+
+```python
+# Configuration for fine-tuning on specific tasks
+config = GPTConfig(
+    block_size=512,      # Match your data's sequence length
+    dropout=0.1,         # Add dropout to prevent overfitting
+    bias=True,           # Keep if loading pretrained weights
+)
+```

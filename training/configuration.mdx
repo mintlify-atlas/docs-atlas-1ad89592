@@ -1,0 +1,694 @@
+---
+title: "Configuration System"
+description: "Understanding nanoGPT's configurator.py system for flexible training configuration"
+---
+
+## Overview
+
+NanoGPT uses a unique "Poor Man's Configurator" system that allows flexible configuration through Python files and command-line arguments. This approach prioritizes simplicity and hackability over complex configuration frameworks.
+
+<Info>
+The configurator system is executed via `exec(open('configurator.py').read())` in train.py, directly modifying global variables.
+</Info>
+
+## How It Works
+
+### The Configurator Script
+
+From configurator.py:1-48:
+
+```python
+"""
+Poor Man's Configurator. Probably a terrible idea. Example usage:
+$ python train.py config/override_file.py --batch_size=32
+this will first run config/override_file.py, then override batch_size to 32
+
+The code in this file will be run as follows from e.g. train.py:
+>>> exec(open('configurator.py').read())
+
+So it's not a Python module, it's just shuttling this code away from train.py
+The code in this script then overrides the globals()
+
+I know people are not going to love this, I just really dislike configuration
+complexity and having to prepend config. to every single variable. If someone
+comes up with a better simple Python solution I am all ears.
+"""
+
+import sys
+from ast import literal_eval
+
+for arg in sys.argv[1:]:
+    if '=' not in arg:
+        # assume it's the name of a config file
+        assert not arg.startswith('--')
+        config_file = arg
+        print(f"Overriding config with {config_file}:")
+        with open(config_file) as f:
+            print(f.read())
+        exec(open(config_file).read())
+    else:
+        # assume it's a --key=value argument
+        assert arg.startswith('--')
+        key, val = arg.split('=')
+        key = key[2:]
+        if key in globals():
+            try:
+                # attempt to eval it (e.g. if bool, number, or etc)
+                attempt = literal_eval(val)
+            except (SyntaxError, ValueError):
+                # if that goes wrong, just use the string
+                attempt = val
+            # ensure the types match ok
+            assert type(attempt) == type(globals()[key])
+            # cross fingers
+            print(f"Overriding: {key} = {attempt}")
+            globals()[key] = attempt
+        else:
+            raise ValueError(f"Unknown config key: {key}")
+```
+
+### Execution Flow
+
+From train.py:76-78:
+
+```python
+config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
+exec(open('configurator.py').read())  # overrides from command line or config file
+config = {k: globals()[k] for k in config_keys}  # will be useful for logging
+```
+
+<Steps>
+  <Step title="Default Values Set">
+    train.py defines default values for all configuration parameters (lines 35-74)
+  </Step>
+  
+  <Step title="Config Keys Captured">
+    All global variables (int, float, bool, str) are identified as configuration keys
+  </Step>
+  
+  <Step title="Configurator Executed">
+    `configurator.py` is executed, processing command-line arguments
+  </Step>
+  
+  <Step title="Values Overridden">
+    Config files and CLI arguments override the defaults in `globals()`
+  </Step>
+  
+  <Step title="Config Dictionary Created">
+    Final configuration is captured for logging and checkpointing
+  </Step>
+</Steps>
+
+## Using Config Files
+
+### Basic Usage
+
+Run train.py with a config file:
+
+```bash
+python train.py config/train_shakespeare_char.py
+```
+
+This:
+1. Loads defaults from train.py
+2. Executes `config/train_shakespeare_char.py`
+3. Overrides defaults with values from the config
+
+### Config File Structure
+
+A config file is just Python code that sets variables:
+
+```python
+# config/train_shakespeare_char.py
+
+out_dir = 'out-shakespeare-char'
+eval_interval = 250
+eval_iters = 200
+log_interval = 10
+
+always_save_checkpoint = False
+
+wandb_log = False
+wandb_project = 'shakespeare-char'
+wandb_run_name = 'mini-gpt'
+
+dataset = 'shakespeare_char'
+gradient_accumulation_steps = 1
+batch_size = 64
+block_size = 256
+
+# baby GPT model :)
+n_layer = 6
+n_head = 6
+n_embd = 384
+dropout = 0.2
+
+learning_rate = 1e-3
+max_iters = 5000
+lr_decay_iters = 5000
+min_lr = 1e-4
+beta2 = 0.99
+
+warmup_iters = 100
+```
+
+<Note>
+Only variables that differ from defaults need to be specified. Unspecified variables retain their default values.
+</Note>
+
+### Minimal Config Example
+
+You can create minimal configs that only override what's needed:
+
+```python
+# config/quick_test.py
+# Minimal config for quick testing
+
+max_iters = 100
+eval_interval = 50
+log_interval = 10
+compile = False
+```
+
+## Command-Line Overrides
+
+### Override Syntax
+
+Command-line arguments override both defaults and config file values:
+
+```bash
+python train.py config/train_shakespeare_char.py --batch_size=32 --max_iters=10000
+```
+
+**Processing order:**
+1. Defaults from train.py
+2. Config file values
+3. Command-line overrides (highest priority)
+
+### Type Preservation
+
+From configurator.py:34-46:
+
+```python
+try:
+    # attempt to eval it (e.g. if bool, number, or etc)
+    attempt = literal_eval(val)
+except (SyntaxError, ValueError):
+    # if that goes wrong, just use the string
+    attempt = val
+# ensure the types match ok
+assert type(attempt) == type(globals()[key])
+```
+
+The configurator:
+- Uses `ast.literal_eval()` to parse values
+- Preserves types (int, float, bool, str)
+- Validates type matches the default
+
+<Warning>
+Type mismatches cause errors. If the default is `batch_size = 12` (int), then `--batch_size=12.5` will fail.
+</Warning>
+
+### Boolean Values
+
+<Tabs>
+  <Tab title="Correct">
+    ```bash
+    python train.py --compile=False
+    python train.py --wandb_log=True
+    python train.py --bias=False
+    ```
+  </Tab>
+
+  <Tab title="Incorrect">
+    ```bash
+    # These won't work as expected:
+    python train.py --compile=false  # lowercase
+    python train.py --compile=0      # int instead of bool
+    python train.py --compile        # no value
+    ```
+  </Tab>
+</Tabs>
+
+### String Values
+
+```bash
+python train.py --device=cuda:1
+python train.py --init_from=resume
+python train.py --out_dir=my-checkpoint
+python train.py --dtype=float32
+```
+
+### Numeric Values
+
+```bash
+# Integers
+python train.py --batch_size=32 --max_iters=10000
+
+# Floats  
+python train.py --learning_rate=1e-3 --dropout=0.1
+
+# Scientific notation
+python train.py --min_lr=6e-5
+```
+
+## Configuration Examples
+
+### Example 1: Quick CPU Test
+
+```bash
+python train.py config/train_shakespeare_char.py \
+  --device=cpu \
+  --compile=False \
+  --max_iters=100 \
+  --eval_interval=50
+```
+
+### Example 2: Smaller Model for Limited VRAM
+
+```bash
+python train.py config/train_gpt2.py \
+  --n_layer=8 \
+  --n_head=8 \
+  --n_embd=512 \
+  --batch_size=8 \
+  --gradient_accumulation_steps=60
+```
+
+### Example 3: Resume with Different Learning Rate
+
+```bash
+python train.py config/train_gpt2.py \
+  --init_from=resume \
+  --learning_rate=1e-4 \
+  --max_iters=700000
+```
+
+### Example 4: Enable Logging
+
+```bash
+python train.py config/train_shakespeare_char.py \
+  --wandb_log=True \
+  --wandb_project=my-project \
+  --wandb_run_name=experiment-1
+```
+
+## Creating Custom Configs
+
+### Starting from Scratch
+
+<Steps>
+  <Step title="Copy Existing Config">
+    Start with a similar config:
+    
+    ```bash
+    cp config/train_shakespeare_char.py config/my_config.py
+    ```
+  </Step>
+
+  <Step title="Modify Parameters">
+    Edit `config/my_config.py`:
+    
+    ```python
+    # My custom configuration
+    
+    out_dir = 'out-my-experiment'
+    dataset = 'my_dataset'
+    
+    # Larger model
+    n_layer = 8
+    n_head = 8
+    n_embd = 512
+    
+    # Longer training
+    max_iters = 20000
+    
+    # More frequent evaluation
+    eval_interval = 500
+    ```
+  </Step>
+
+  <Step title="Run Training">
+    ```bash
+    python train.py config/my_config.py
+    ```
+  </Step>
+</Steps>
+
+### Template for New Configs
+
+```python
+# config/template.py
+# Description of what this config is for
+
+# I/O
+out_dir = 'out'
+dataset = 'openwebtext'
+eval_interval = 2000
+eval_iters = 200
+log_interval = 1
+always_save_checkpoint = True
+
+# Wandb logging
+wandb_log = False
+wandb_project = 'project-name'
+wandb_run_name = 'run-name'
+
+# Model architecture
+n_layer = 12
+n_head = 12
+n_embd = 768
+block_size = 1024
+dropout = 0.0
+bias = False
+
+# Training
+batch_size = 12
+gradient_accumulation_steps = 40
+max_iters = 600000
+
+# Optimization
+learning_rate = 6e-4
+min_lr = 6e-5
+weight_decay = 1e-1
+beta1 = 0.9
+beta2 = 0.95
+grad_clip = 1.0
+
+# Learning rate schedule
+decay_lr = True
+warmup_iters = 2000
+lr_decay_iters = 600000
+
+# System
+device = 'cuda'
+dtype = 'bfloat16'
+compile = True
+```
+
+## Available Configuration Parameters
+
+### I/O Configuration
+
+```python
+out_dir = 'out'                    # Output directory for checkpoints
+eval_interval = 2000               # How often to evaluate (iterations)
+log_interval = 1                   # How often to log to console
+eval_iters = 200                   # Number of iterations for evaluation
+eval_only = False                  # If True, exit after first eval
+always_save_checkpoint = True      # Save checkpoint even if val loss doesn't improve
+init_from = 'scratch'              # 'scratch', 'resume', or 'gpt2*'
+```
+
+### Wandb Logging
+
+```python
+wandb_log = False                  # Enable Weights & Biases logging
+wandb_project = 'owt'              # W&B project name
+wandb_run_name = 'gpt2'            # W&B run name
+```
+
+### Data Configuration
+
+```python
+dataset = 'openwebtext'            # Dataset name (directory under data/)
+gradient_accumulation_steps = 40   # Simulate larger batch sizes
+batch_size = 12                    # Micro-batch size per GPU
+block_size = 1024                  # Context length
+```
+
+### Model Architecture
+
+```python
+n_layer = 12                       # Number of transformer layers
+n_head = 12                        # Number of attention heads
+n_embd = 768                       # Embedding dimension
+dropout = 0.0                      # Dropout rate (0.0 for pretraining)
+bias = False                       # Use bias in LayerNorm and Linear layers
+```
+
+### Optimization
+
+```python
+learning_rate = 6e-4               # Maximum learning rate
+max_iters = 600000                 # Total training iterations
+weight_decay = 1e-1                # L2 regularization
+beta1 = 0.9                        # Adam beta1
+beta2 = 0.95                       # Adam beta2
+grad_clip = 1.0                    # Gradient clipping (0.0 to disable)
+```
+
+### Learning Rate Schedule
+
+```python
+decay_lr = True                    # Enable LR decay
+warmup_iters = 2000                # Linear warmup steps
+lr_decay_iters = 600000            # Cosine decay period
+min_lr = 6e-5                      # Minimum learning rate
+```
+
+### System Configuration
+
+```python
+device = 'cuda'                    # 'cpu', 'cuda', 'cuda:0', 'mps'
+dtype = 'bfloat16'                 # 'float32', 'bfloat16', 'float16'
+compile = True                     # Use torch.compile (PyTorch 2.0+)
+backend = 'nccl'                   # DDP backend: 'nccl', 'gloo'
+```
+
+## Advanced Patterns
+
+### Conditional Configuration
+
+Config files can include Python logic:
+
+```python
+# config/adaptive_config.py
+import torch
+
+# Adaptive dtype based on GPU
+if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+    dtype = 'bfloat16'
+else:
+    dtype = 'float16'
+
+# Adaptive batch size based on available memory
+total_memory = torch.cuda.get_device_properties(0).total_memory if torch.cuda.is_available() else 0
+if total_memory > 40 * 1024**3:  # > 40GB
+    batch_size = 16
+    gradient_accumulation_steps = 30
+else:
+    batch_size = 12
+    gradient_accumulation_steps = 40
+
+# Other config...
+max_iters = 600000
+```
+
+### Importing Constants
+
+```python
+# config/constants.py
+GPT2_124M = {
+    'n_layer': 12,
+    'n_head': 12,
+    'n_embd': 768,
+}
+
+GPT2_MEDIUM = {
+    'n_layer': 24,
+    'n_head': 16,
+    'n_embd': 1024,
+}
+```
+
+```python
+# config/train_gpt2_medium.py
+from constants import GPT2_MEDIUM
+
+n_layer = GPT2_MEDIUM['n_layer']
+n_head = GPT2_MEDIUM['n_head']
+n_embd = GPT2_MEDIUM['n_embd']
+
+# Rest of config...
+```
+
+### Environment-Based Configuration
+
+```python
+# config/train_with_env.py
+import os
+
+# Read from environment variables
+out_dir = os.environ.get('NANOGPT_OUT_DIR', 'out')
+wandb_project = os.environ.get('WANDB_PROJECT', 'owt')
+device = os.environ.get('CUDA_VISIBLE_DEVICES', 'cuda')
+
+# Rest of config...
+```
+
+Run with:
+
+```bash
+export NANOGPT_OUT_DIR=out-experiment-1
+export WANDB_PROJECT=my-project
+python train.py config/train_with_env.py
+```
+
+## Config Validation
+
+The configurator validates:
+
+1. **Type matching**: Overrides must match the type of the default
+2. **Key existence**: Only existing config keys can be overridden
+
+```python
+# From configurator.py:41-46
+assert type(attempt) == type(globals()[key])
+print(f"Overriding: {key} = {attempt}")
+globals()[key] = attempt
+```
+
+If validation fails:
+
+```bash
+$ python train.py --batch_size=12.5
+AssertionError: type mismatch (default is int, got float)
+
+$ python train.py --invalid_key=value  
+ValueError: Unknown config key: invalid_key
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Use Config Files for Experiments">
+    Create separate config files for different experiments:
+    
+    ```
+    config/
+      train_baseline.py
+      train_larger_model.py
+      train_more_regularization.py
+      train_longer.py
+    ```
+  </Step>
+
+  <Step title="Override Only What Changes">
+    Don't repeat defaults. Only specify what differs:
+    
+    ```python
+    # Good: Only overrides
+    max_iters = 10000
+    learning_rate = 3e-4
+    
+    # Bad: Repeating defaults
+    max_iters = 10000
+    learning_rate = 3e-4
+    batch_size = 12  # This is already the default
+    block_size = 1024  # This is already the default
+    ```
+  </Step>
+
+  <Step title="Document Your Configs">
+    Add comments explaining why you chose certain values:
+    
+    ```python
+    # Increased from default 5000 to allow more learning
+    max_iters = 20000
+    
+    # Higher dropout to combat overfitting on small dataset
+    dropout = 0.3
+    ```
+  </Step>
+
+  <Step title="Use Descriptive Output Directories">
+    ```python
+    out_dir = 'out-gpt2-124M-baseline'
+    out_dir = 'out-shakespeare-large-model'
+    ```
+  </Step>
+
+  <Step title="Combine Configs with CLI for Quick Tests">
+    ```bash
+    # Base config + quick overrides for testing
+    python train.py config/train_gpt2.py --max_iters=100 --compile=False
+    ```
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+### "Unknown config key" Error
+
+**Error**: `ValueError: Unknown config key: xyz`
+
+**Cause**: Trying to override a parameter that doesn't exist in train.py defaults.
+
+**Solution**: Check train.py:34-74 for available parameters, or add the parameter to train.py.
+
+### Type Mismatch Error
+
+**Error**: `AssertionError` after "Overriding: ..."
+
+**Cause**: Type of override doesn't match the default type.
+
+**Solution**: Ensure types match:
+- Use `True`/`False` for booleans, not `1`/`0`
+- Use `1e-3` for floats, not `1e-3` for ints
+
+### Config File Not Found
+
+**Error**: `FileNotFoundError: config/my_config.py`
+
+**Solution**: Use paths relative to where you run train.py:
+
+```bash
+# From nanoGPT root directory:
+python train.py config/my_config.py
+
+# NOT from config/ directory:
+# cd config && python ../train.py my_config.py  # Won't work
+```
+
+### Overrides Not Taking Effect
+
+**Check execution order**:
+
+1. Are you specifying the config file before CLI overrides?
+   ```bash
+   # Correct:
+   python train.py config/train_gpt2.py --batch_size=32
+   
+   # Wrong order (CLI args ignored):
+   python train.py --batch_size=32 config/train_gpt2.py
+   ```
+
+2. Is your config file overriding the CLI args?
+   ```python
+   # In config file:
+   batch_size = 64  # This overrides any CLI --batch_size
+   ```
+
+<Note>
+**Precedence**: CLI args > Config file > Defaults
+
+BUT: CLI args are processed in order, so if the config file comes after a CLI arg, it will override it.
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Training Overview" icon="book" href="/training/overview">
+    Learn the training system fundamentals
+  </Card>
+  <Card title="Shakespeare Training" icon="scroll" href="/training/shakespeare">
+    Hands-on example using configs
+  </Card>
+  <Card title="GPT-2 Reproduction" icon="rocket" href="/training/gpt2-reproduction">
+    Advanced config usage for large-scale training
+  </Card>
+  <Card title="Distributed Training" icon="server" href="/training/distributed">
+    Combine configs with DDP
+  </Card>
+</CardGroup>

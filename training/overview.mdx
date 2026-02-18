@@ -1,0 +1,308 @@
+---
+title: "Training Overview"
+description: "Understanding the nanoGPT training system and key concepts"
+---
+
+## Introduction
+
+The nanoGPT training system is designed to be simple, readable, and efficient. The core training loop in `train.py` is approximately 300 lines of boilerplate code that can train GPT models from scratch or finetune pretrained checkpoints.
+
+## Key Concepts
+
+### Training Loop Architecture
+
+The training system follows a standard deep learning workflow:
+
+<Steps>
+  <Step title="Data Loading">
+    Uses a "poor man's data loader" with memory-mapped files (`train.bin` and `val.bin`) for efficient data access
+  </Step>
+  
+  <Step title="Model Initialization">
+    Three initialization modes: `scratch` (new model), `resume` (from checkpoint), or `gpt2*` (from OpenAI weights)
+  </Step>
+  
+  <Step title="Training Loop">
+    Forward pass, backward pass, gradient accumulation, and optimizer step with optional gradient clipping
+  </Step>
+  
+  <Step title="Evaluation & Checkpointing">
+    Periodic validation loss computation and checkpoint saving
+  </Step>
+</Steps>
+
+### Core Training Parameters
+
+The training script exposes several key configuration parameters:
+
+```python
+# Model architecture
+n_layer = 12          # Number of transformer layers
+n_head = 12           # Number of attention heads
+n_embd = 768          # Embedding dimension
+block_size = 1024     # Context length
+dropout = 0.0         # Dropout rate (0.0 for pretraining)
+
+# Optimization
+learning_rate = 6e-4  # Maximum learning rate
+max_iters = 600000    # Total training iterations
+batch_size = 12       # Micro-batch size per GPU
+gradient_accumulation_steps = 40  # Simulate larger batches
+grad_clip = 1.0       # Gradient clipping threshold
+
+# Learning rate schedule
+warmup_iters = 2000   # Linear warmup steps
+lr_decay_iters = 600000  # Cosine decay period
+min_lr = 6e-5         # Minimum learning rate
+```
+
+## Data Format
+
+<Info>
+All datasets must be preprocessed into binary files containing token IDs stored as `uint16` values.
+</Info>
+
+The data loader expects:
+
+- `train.bin` - Training data as raw uint16 bytes
+- `val.bin` - Validation data as raw uint16 bytes
+- `meta.pkl` (optional) - Metadata including vocab_size
+
+### Data Loading Code
+
+From train.py:114-131:
+
+```python
+def get_batch(split):
+    # We recreate np.memmap every batch to avoid a memory leak
+    if split == 'train':
+        data = np.memmap(os.path.join(data_dir, 'train.bin'), 
+                        dtype=np.uint16, mode='r')
+    else:
+        data = np.memmap(os.path.join(data_dir, 'val.bin'), 
+                        dtype=np.uint16, mode='r')
+    ix = torch.randint(len(data) - block_size, (batch_size,))
+    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) 
+                     for i in ix])
+    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) 
+                     for i in ix])
+    if device_type == 'cuda':
+        x, y = x.pin_memory().to(device, non_blocking=True), \
+               y.pin_memory().to(device, non_blocking=True)
+    else:
+        x, y = x.to(device), y.to(device)
+    return x, y
+```
+
+## Gradient Accumulation
+
+Gradient accumulation simulates larger batch sizes without increasing memory usage:
+
+```python
+# Effective batch size calculation
+tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * block_size
+
+# Example: GPT-2 (124M) training
+# 40 grad_accum * 8 GPUs * 12 batch * 1024 tokens = 3,932,160 tokens/iter
+```
+
+From train.py:290-305:
+
+```python
+for micro_step in range(gradient_accumulation_steps):
+    if ddp:
+        # Only sync gradients at the last micro step
+        model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
+    with ctx:
+        logits, loss = model(X, Y)
+        loss = loss / gradient_accumulation_steps
+    # Async prefetch next batch during forward pass
+    X, Y = get_batch('train')
+    scaler.scale(loss).backward()
+```
+
+## Learning Rate Schedule
+
+The training uses a cosine decay schedule with linear warmup:
+
+```python
+def get_lr(it):
+    # 1) Linear warmup for warmup_iters steps
+    if it < warmup_iters:
+        return learning_rate * (it + 1) / (warmup_iters + 1)
+    # 2) If it > lr_decay_iters, return min learning rate
+    if it > lr_decay_iters:
+        return min_lr
+    # 3) In between, use cosine decay down to min learning rate
+    decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    return min_lr + coeff * (learning_rate - min_lr)
+```
+
+<Note>
+The `lr_decay_iters` should typically equal `max_iters` for optimal results, as recommended by the Chinchilla paper.
+</Note>
+
+## Mixed Precision Training
+
+The training script supports automatic mixed precision with three dtypes:
+
+```python
+dtype = 'bfloat16'  # Best on A100 GPUs (if supported)
+# dtype = 'float16'  # Good fallback, uses GradScaler automatically
+# dtype = 'float32'  # Full precision, slower
+
+ptdtype = {'float32': torch.float32, 
+           'bfloat16': torch.bfloat16, 
+           'float16': torch.float16}[dtype]
+ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+
+# GradScaler for float16 (automatic)
+scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+```
+
+<Warning>
+When using `float16`, gradient scaling is automatically enabled to prevent underflow.
+</Warning>
+
+## Model Compilation
+
+PyTorch 2.0's `torch.compile()` provides significant speedup:
+
+```python
+compile = True  # Enable torch.compile
+
+if compile:
+    print("compiling the model... (takes a ~minute)")
+    unoptimized_model = model
+    model = torch.compile(model)  # Requires PyTorch 2.0+
+```
+
+<Info>
+Compilation typically reduces iteration time by ~40-50% (e.g., 250ms → 135ms per iteration).
+</Info>
+
+## Hardware Requirements
+
+### Shakespeare Character-Level Model
+
+**Minimum requirements:**
+- Single GPU (any consumer GPU with 4GB+ VRAM)
+- Training time: ~3 minutes on A100
+- Model size: ~10M parameters (6 layers, 384 embed dim)
+
+**CPU training:**
+- Possible but slow (~3 minutes for 2000 iterations)
+- Use `--device=cpu --compile=False`
+
+### GPT-2 (124M) Reproduction
+
+**Recommended setup:**
+- 8x A100 40GB GPUs
+- Training time: ~4 days
+- Final validation loss: ~2.85
+
+**Memory requirements:**
+- ~12GB per GPU with default settings
+- Batch size 12, block size 1024
+
+## Checkpointing
+
+Checkpoints are saved periodically to the `out_dir`:
+
+```python
+checkpoint = {
+    'model': raw_model.state_dict(),
+    'optimizer': optimizer.state_dict(),
+    'model_args': model_args,
+    'iter_num': iter_num,
+    'best_val_loss': best_val_loss,
+    'config': config,
+}
+torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+```
+
+Resume training with:
+
+```bash
+python train.py --init_from=resume --out_dir=your-checkpoint-dir
+```
+
+## Logging
+
+### Console Logging
+
+```bash
+iter 0: loss 10.9392, time 250.13ms, mfu 0.00%
+iter 10: loss 6.2451, time 135.42ms, mfu 28.73%
+step 1000: train loss 3.1234, val loss 3.2156
+```
+
+### Weights & Biases Integration
+
+Enable W&B logging:
+
+```python
+wandb_log = True
+wandb_project = 'owt'
+wandb_run_name = 'gpt2-124M'
+```
+
+Logged metrics:
+- Training and validation loss
+- Learning rate
+- MFU (Model FLOPs Utilization)
+- Iteration number
+
+## Model FLOPs Utilization (MFU)
+
+MFU measures hardware efficiency:
+
+```python
+mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
+running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
+```
+
+<Note>
+Typical MFU values: 25-35% for A100s with optimized settings.
+</Note>
+
+## Validation Loss Estimation
+
+From train.py:214-228:
+
+```python
+@torch.no_grad()
+def estimate_loss():
+    out = {}
+    model.eval()
+    for split in ['train', 'val']:
+        losses = torch.zeros(eval_iters)
+        for k in range(eval_iters):
+            X, Y = get_batch(split)
+            with ctx:
+                logits, loss = model(X, Y)
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    model.train()
+    return out
+```
+
+The `eval_iters` parameter (default 200) controls estimation accuracy vs. speed.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Shakespeare Training" icon="scroll" href="/training/shakespeare">
+    Step-by-step guide for character-level training
+  </Card>
+  <Card title="GPT-2 Reproduction" icon="rocket" href="/training/gpt2-reproduction">
+    Reproduce GPT-2 (124M) results
+  </Card>
+  <Card title="Distributed Training" icon="server" href="/training/distributed">
+    Multi-GPU and multi-node training
+  </Card>
+  <Card title="Configuration System" icon="gear" href="/training/configuration">
+    Master the configurator system
+  </Card>
+</CardGroup>

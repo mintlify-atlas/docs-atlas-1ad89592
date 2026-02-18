@@ -1,0 +1,266 @@
+---
+title: 'Finetuning'
+description: 'Finetune pretrained GPT-2 models on your own datasets'
+---
+
+## Overview
+
+Finetuning in nanoGPT is no different than training - you simply initialize from a pretrained model and train with a smaller learning rate. This allows you to adapt large pretrained models like GPT-2 to your specific datasets quickly and efficiently.
+
+<Note>
+Finetuning can take very little time on a single GPU - often just a few minutes for smaller datasets.
+</Note>
+
+## Quick Start
+
+The fastest way to get started with finetuning is to use the Shakespeare dataset example:
+
+<Steps>
+  <Step title="Prepare your dataset">
+    First, prepare the Shakespeare dataset using the GPT-2 BPE tokenizer:
+    
+    ```bash
+    python data/shakespeare/prepare.py
+    ```
+    
+    This will download the tiny Shakespeare dataset and create `train.bin` and `val.bin` files. Unlike OpenWebText, this runs in seconds.
+  </Step>
+
+  <Step title="Run finetuning">
+    Start finetuning from a pretrained GPT-2 checkpoint:
+    
+    ```bash
+    python train.py config/finetune_shakespeare.py
+    ```
+    
+    This loads the configuration from `config/finetune_shakespeare.py` and begins finetuning.
+  </Step>
+
+  <Step title="Monitor training">
+    The training will show progress in your terminal. The best checkpoint (lowest validation loss) will be saved in the `out_dir` directory specified in the config (default: `out-shakespeare`).
+  </Step>
+
+  <Step title="Sample from the finetuned model">
+    Once training completes, generate text from your finetuned model:
+    
+    ```bash
+    python sample.py --out_dir=out-shakespeare
+    ```
+  </Step>
+</Steps>
+
+## Configuration
+
+The finetuning configuration is controlled through Python config files. Here's the example from `config/finetune_shakespeare.py`:
+
+```python
+import time
+
+out_dir = 'out-shakespeare'
+eval_interval = 5
+eval_iters = 40
+wandb_log = False # feel free to turn on
+wandb_project = 'shakespeare'
+wandb_run_name = 'ft-' + str(time.time())
+
+dataset = 'shakespeare'
+init_from = 'gpt2-xl' # this is the largest GPT-2 model
+
+# only save checkpoints if the validation loss improves
+always_save_checkpoint = False
+
+# the number of examples per iter:
+# 1 batch_size * 32 grad_accum * 1024 tokens = 32,768 tokens/iter
+# shakespeare has 301,966 tokens, so 1 epoch ~= 9.2 iters
+batch_size = 1
+gradient_accumulation_steps = 32
+max_iters = 20
+
+# finetune at constant LR
+learning_rate = 3e-5
+decay_lr = False
+```
+
+### Key Configuration Parameters
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `init_from` | `gpt2-xl` | Which pretrained model to start from |
+| `learning_rate` | `3e-5` | Small learning rate for finetuning (much lower than training from scratch) |
+| `decay_lr` | `False` | Keep learning rate constant during finetuning |
+| `max_iters` | `20` | Number of training iterations |
+| `batch_size` | `1` | Batch size per GPU |
+| `gradient_accumulation_steps` | `32` | Accumulate gradients over multiple steps |
+| `always_save_checkpoint` | `False` | Only save when validation loss improves |
+
+<Note>
+With gradient accumulation, the effective batch size is `batch_size * gradient_accumulation_steps * 1024 tokens = 32,768 tokens/iter`
+</Note>
+
+## Available Pretrained Models
+
+You can initialize from any of these GPT-2 variants:
+
+<CodeGroup>
+
+```python GPT-2 (124M)
+init_from = 'gpt2'
+```
+
+```python GPT-2 Medium (350M)
+init_from = 'gpt2-medium'
+```
+
+```python GPT-2 Large (774M)
+init_from = 'gpt2-large'
+```
+
+```python GPT-2 XL (1.3B)
+init_from = 'gpt2-xl'
+```
+
+</CodeGroup>
+
+<Tip>
+The larger models (gpt2-large, gpt2-xl) will produce better results but require more memory. If you're running out of memory, try:
+- Using a smaller model variant
+- Decreasing `batch_size`
+- Decreasing `block_size` (context length)
+</Tip>
+
+## Finetuning Your Own Dataset
+
+To finetune on your own data:
+
+<Steps>
+  <Step title="Prepare your data">
+    Create a data preparation script similar to `data/shakespeare/prepare.py` that:
+    - Downloads or loads your text data
+    - Tokenizes using GPT-2's BPE tokenizer (tiktoken)
+    - Splits into train and validation sets
+    - Saves as `train.bin` and `val.bin`
+  </Step>
+
+  <Step title="Create a config file">
+    Copy `config/finetune_shakespeare.py` and modify:
+    
+    ```python
+    out_dir = 'out-my-dataset'
+    dataset = 'my-dataset'
+    init_from = 'gpt2-xl'  # or another variant
+    learning_rate = 3e-5
+    max_iters = 50  # adjust based on dataset size
+    ```
+  </Step>
+
+  <Step title="Run finetuning">
+    ```bash
+    python train.py config/finetune_my_dataset.py
+    ```
+  </Step>
+</Steps>
+
+## Example Output
+
+After finetuning GPT-2 XL on Shakespeare, you can get results like:
+
+```
+THEODORE:
+Thou shalt sell me to the highest bidder: if I die,
+I sell thee to the first; if I go mad,
+I sell thee to the second; if I
+lie, I sell thee to the third; if I slay,
+I sell thee to the fourth: so buy or sell,
+I tell thee again, thou shalt not sell my
+possession.
+
+JULIET:
+And if thou steal, thou shalt not sell thyself.
+
+THEODORE:
+I do not steal; I sell the stolen goods.
+```
+
+<Note>
+The model learns both the writing style and character patterns from the training data!
+</Note>
+
+## Performance Expectations
+
+### Training Time
+
+- **Shakespeare dataset**: Few minutes on a single GPU
+- **Larger datasets**: Scales based on number of iterations and dataset size
+
+### Loss Improvements
+
+When finetuning GPT-2 (124M) on OpenWebText:
+- Starting validation loss: ~3.11
+- After finetuning: ~2.85
+- Improvement due to domain adaptation
+
+## Command Line Overrides
+
+You can override any config parameter from the command line:
+
+```bash
+python train.py config/finetune_shakespeare.py \
+    --learning_rate=1e-5 \
+    --max_iters=50 \
+    --batch_size=2
+```
+
+## Monitoring with Weights & Biases
+
+Enable W&B logging in your config:
+
+```python
+wandb_log = True
+wandb_project = 'my-project'
+wandb_run_name = 'finetune-experiment-1'
+```
+
+Then run training and view results at [wandb.ai](https://wandb.ai).
+
+## Troubleshooting
+
+### Out of Memory
+
+If you run out of GPU memory:
+
+<CodeGroup>
+
+```python Use Smaller Model
+init_from = 'gpt2'  # instead of gpt2-xl
+```
+
+```python Reduce Batch Size
+batch_size = 1
+gradient_accumulation_steps = 16  # instead of 32
+```
+
+```python Reduce Context Length
+block_size = 512  # instead of 1024
+```
+
+</CodeGroup>
+
+### Poor Results
+
+If finetuning doesn't improve results:
+- Increase `max_iters` to train longer
+- Adjust `learning_rate` (try 1e-5 or 5e-5)
+- Ensure dataset is properly prepared and tokenized
+- Check that validation loss is decreasing
+
+<Warning>
+Be careful not to overtrain on small datasets - monitor validation loss and stop when it starts increasing.
+</Warning>
+
+## Best Practices
+
+1. **Start with a pretrained model**: Always use `init_from` to start from GPT-2 weights
+2. **Use a small learning rate**: Typically 3e-5 to 1e-4 (much smaller than training from scratch)
+3. **Monitor validation loss**: Use `always_save_checkpoint = False` to keep only the best checkpoint
+4. **Adjust iterations based on dataset size**: Smaller datasets need fewer iterations
+5. **Enable gradient accumulation**: For effective larger batch sizes with limited memory

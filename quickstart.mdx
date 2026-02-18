@@ -1,80 +1,235 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: 'Quick Start'
+description: 'Train your first GPT model on Shakespeare in under 5 minutes'
+icon: 'rocket'
 ---
 
-## Get started in three steps
-
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+Get up and running with nanoGPT in minutes by training a character-level GPT on the works of Shakespeare.
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+This quickstart guide walks you through the fastest way to get started. If you haven't installed nanoGPT yet, head to the [Installation](/installation) guide first.
 </Note>
+
+## Prerequisites
+
+Before you begin, make sure you have:
+- Python 3.8+ installed
+- PyTorch and dependencies installed ([Installation Guide](/installation))
+- A GPU (recommended but not required)
+
+## Train Your First Model
+
+<Steps>
+  <Step title="Prepare the Dataset">
+    First, download and prepare the Shakespeare dataset. This creates binary training files that nanoGPT can read efficiently.
+
+    ```bash
+    cd nanoGPT
+    python data/shakespeare_char/prepare.py
+    ```
+
+    This creates `train.bin` and `val.bin` in the `data/shakespeare_char/` directory. The dataset is about 1MB and contains all of Shakespeare's works tokenized at the character level.
+  </Step>
+
+  <Step title="Train the Model">
+    Now train a character-level GPT. Choose the command based on your hardware:
+
+    <CodeGroup>
+    ```bash GPU (Recommended)
+    python train.py config/train_shakespeare_char.py
+    ```
+
+    ```bash CPU
+    python train.py config/train_shakespeare_char.py \
+      --device=cpu \
+      --compile=False \
+      --eval_iters=20 \
+      --log_interval=1 \
+      --block_size=64 \
+      --batch_size=12 \
+      --n_layer=4 \
+      --n_head=4 \
+      --n_embd=128 \
+      --max_iters=2000 \
+      --lr_decay_iters=2000 \
+      --dropout=0.0
+    ```
+
+    ```bash Apple Silicon (M1/M2/M3)
+    python train.py config/train_shakespeare_char.py \
+      --device=mps \
+      --compile=False
+    ```
+    </CodeGroup>
+
+    **Training time:**
+    - **GPU (A100)**: ~3 minutes, validation loss ~1.47
+    - **CPU**: ~3 minutes, validation loss ~1.88
+    - **Apple Silicon**: ~5-10 minutes (2-3x faster than CPU)
+
+    You'll see training progress logged to your terminal:
+    ```
+    step 0: train loss 4.2895, val loss 4.2939
+    step 100: train loss 2.7058, val loss 2.7218
+    step 200: train loss 2.5015, val loss 2.5289
+    ...
+    step 5000: train loss 1.4697, val loss 1.4857
+    ```
+  </Step>
+
+  <Step title="Generate Text">
+    Once training completes, generate text from your trained model:
+
+    ```bash
+    python sample.py --out_dir=out-shakespeare-char
+    ```
+
+    For CPU-only systems:
+    ```bash
+    python sample.py --out_dir=out-shakespeare-char --device=cpu
+    ```
+
+    **Example output:**
+    ```
+    ANGELO:
+    And cowards it be strawn to my bed,
+    And thrust the gates of my threats,
+    Because he that ale away, and hang'd
+    An one with him.
+
+    DUKE VINCENTIO:
+    I thank your eyes against it.
+
+    DUKE VINCENTIO:
+    Then will answer him to save the malm:
+    And what have you tyrannous shall do this?
+    ```
+
+    Not bad for a character-level model trained in 3 minutes!
+  </Step>
+</Steps>
+
+## Understanding the Configuration
+
+The `config/train_shakespeare_char.py` configuration file contains:
+
+```python
+# From config/train_shakespeare_char.py
+out_dir = 'out-shakespeare-char'
+eval_interval = 250
+eval_iters = 200
+log_interval = 10
+
+# Data
+dataset = 'shakespeare_char'
+gradient_accumulation_steps = 1
+batch_size = 64
+block_size = 256  # Context length
+
+# Model architecture
+n_layer = 6       # Number of transformer layers
+n_head = 6        # Number of attention heads
+n_embd = 384      # Embedding dimension
+dropout = 0.2
+
+# Training
+learning_rate = 1e-3
+max_iters = 5000
+lr_decay_iters = 5000
+```
+
+**Key parameters:**
+- **`block_size=256`**: The model can see up to 256 characters of context
+- **`n_layer=6`, `n_head=6`, `n_embd=384`**: A 6-layer transformer with 6 attention heads and 384-dimensional embeddings (~10M parameters)
+- **`max_iters=5000`**: Trains for 5000 iterations (~3 minutes on GPU)
+
+## Customization Ideas
+
+### Adjust Model Size
+
+Make the model smaller for faster training:
+```bash
+python train.py config/train_shakespeare_char.py \
+  --n_layer=4 \
+  --n_head=4 \
+  --n_embd=256 \
+  --max_iters=2000
+```
+
+Or make it larger for better quality:
+```bash
+python train.py config/train_shakespeare_char.py \
+  --n_layer=8 \
+  --n_head=8 \
+  --n_embd=512 \
+  --max_iters=10000
+```
+
+### Adjust Sampling Parameters
+
+Control the creativity of generated text:
+
+```bash
+# More creative (higher temperature)
+python sample.py --out_dir=out-shakespeare-char --temperature=1.0
+
+# More conservative (lower temperature)
+python sample.py --out_dir=out-shakespeare-char --temperature=0.5
+
+# Generate more samples
+python sample.py --out_dir=out-shakespeare-char --num_samples=20
+
+# Generate longer text
+python sample.py --out_dir=out-shakespeare-char --max_new_tokens=1000
+```
+
+## Troubleshooting
+
+<Accordion title="RuntimeError: Unsupported operation">
+  If you see errors about unsupported operations, disable PyTorch compilation:
+  ```bash
+  python train.py config/train_shakespeare_char.py --compile=False
+  ```
+</Accordion>
+
+<Accordion title="CUDA out of memory">
+  Reduce the batch size or model size:
+  ```bash
+  python train.py config/train_shakespeare_char.py \
+    --batch_size=32 \
+    --n_layer=4 \
+    --n_embd=256
+  ```
+</Accordion>
+
+<Accordion title="Training is very slow">
+  Make sure you're using a GPU and that PyTorch can see it:
+  ```python
+  import torch
+  print(torch.cuda.is_available())  # Should print True
+  ```
+  
+  On Apple Silicon, use `--device=mps` instead of `cuda`.
+</Accordion>
+
+## Next Steps
+
+Congratulations! You've trained your first GPT model. Here's what to explore next:
+
+<CardGroup cols={2}>
+  <Card title="Training Guide" icon="graduation-cap" href="/training/overview">
+    Learn about training configurations, datasets, and distributed training
+  </Card>
+  
+  <Card title="Finetuning" icon="wand-magic-sparkles" href="/usage/finetuning">
+    Finetune pretrained GPT-2 models on your own data
+  </Card>
+  
+  <Card title="Model Architecture" icon="brain" href="/model/architecture">
+    Understand how the GPT model works under the hood
+  </Card>
+  
+  <Card title="GPT-2 Reproduction" icon="chart-line" href="/training/gpt2-reproduction">
+    Reproduce GPT-2 (124M) results on OpenWebText
+  </Card>
+</CardGroup>

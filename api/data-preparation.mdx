@@ -1,0 +1,297 @@
+---
+title: "Data Preparation"
+description: "Learn how to prepare and tokenize datasets for training with nanoGPT"
+---
+
+## Overview
+
+The data preparation scripts convert raw text data into binary format (`.bin` files) containing tokenized sequences ready for training. Each dataset includes a `prepare.py` script that handles downloading, tokenizing, and splitting data into training and validation sets.
+
+## How Preparation Works
+
+<Steps>
+  <Step title="Download raw data">
+    The script downloads the raw text data from its source (e.g., GitHub, HuggingFace) and saves it as `input.txt` in the dataset directory.
+  </Step>
+  
+  <Step title="Tokenization">
+    Text is converted to integer token IDs using either:
+    - **Character-level encoding**: Maps each unique character to an integer (for `shakespeare_char`)
+    - **GPT-2 BPE encoding**: Uses tiktoken with GPT-2's byte-pair encoding (for `shakespeare` and `openwebtext`)
+  </Step>
+  
+  <Step title="Train/validation split">
+    Data is split into training and validation sets:
+    - Shakespeare datasets: 90% train, 10% validation
+    - OpenWebText: 99.95% train, 0.05% validation
+  </Step>
+  
+  <Step title="Binary export">
+    Token IDs are saved as binary files using NumPy's `uint16` dtype:
+    - `train.bin`: Training set tokens
+    - `val.bin`: Validation set tokens
+  </Step>
+</Steps>
+
+## Binary Format
+
+The `.bin` files store token IDs as raw binary data using `numpy.uint16` (16-bit unsigned integers). This format is:
+
+- **Memory efficient**: Uses 2 bytes per token
+- **Fast to load**: Direct memory mapping with `np.memmap`
+- **Simple**: No compression or complex structure
+
+<Note>
+The `uint16` dtype supports token IDs from 0 to 65,535, which covers GPT-2's vocabulary (50,257 tokens) and character-level vocabularies.
+</Note>
+
+### Reading Binary Files
+
+The training loop loads data efficiently using NumPy's memory-mapped arrays:
+
+```python
+import numpy as np
+
+# Memory-map the training data
+data = np.memmap('data/shakespeare/train.bin', dtype=np.uint16, mode='r')
+
+# Access tokens directly without loading entire file into RAM
+tokens = data[0:1000]  # Get first 1000 tokens
+```
+
+This approach allows training on datasets larger than available RAM by loading only the needed portions on-demand.
+
+## Tokenization Methods
+
+### Character-Level Tokenization
+
+Used by `shakespeare_char` dataset for simple character-to-integer mapping:
+
+```python
+# Get unique characters and create mappings
+chars = sorted(list(set(text)))
+stoi = {ch: i for i, ch in enumerate(chars)}  # string to int
+itos = {i: ch for i, ch in enumerate(chars)}  # int to string
+
+# Encode and decode functions
+def encode(s):
+    return [stoi[c] for c in s]
+
+def decode(l):
+    return ''.join([itos[i] for i in l])
+```
+
+**Characteristics:**
+- Small vocabulary (65 characters for Shakespeare)
+- Simple and fast
+- Good for learning character-level patterns
+- Stored in `meta.pkl` for encoding/decoding at inference
+
+### BPE Tokenization
+
+Used by `shakespeare` and `openwebtext` datasets via tiktoken:
+
+```python
+import tiktoken
+
+# Initialize GPT-2 BPE encoder
+enc = tiktoken.get_encoding("gpt2")
+
+# Encode text to token IDs
+train_ids = enc.encode_ordinary(train_data)
+
+# For OpenWebText, append end-of-text token
+ids.append(enc.eot_token)  # 50256 for GPT-2
+```
+
+**Characteristics:**
+- Fixed vocabulary of 50,257 tokens
+- Subword tokenization (efficient for English)
+- Compatible with pretrained GPT-2 models
+- More compact than character-level
+
+## Dataset-Specific Details
+
+### Shakespeare (Character-Level)
+
+```bash
+python data/shakespeare_char/prepare.py
+```
+
+**Output:**
+- `train.bin`: 1,003,854 tokens
+- `val.bin`: 111,540 tokens
+- `meta.pkl`: Character mappings and vocabulary
+
+**Processing:**
+1. Downloads Tiny Shakespeare dataset (1.1MB)
+2. Creates character vocabulary (65 unique characters)
+3. Encodes text with simple character mapping
+4. Saves character-to-int and int-to-character mappings
+
+### Shakespeare (BPE)
+
+```bash
+python data/shakespeare/prepare.py
+```
+
+**Output:**
+- `train.bin`: 301,966 tokens
+- `val.bin`: 36,059 tokens
+
+**Processing:**
+1. Downloads same Tiny Shakespeare dataset
+2. Uses GPT-2 BPE tokenizer via tiktoken
+3. Results in ~3x fewer tokens than character-level
+4. Compatible with GPT-2 pretrained weights
+
+### OpenWebText
+
+```bash
+python data/openwebtext/prepare.py
+```
+
+<Warning>
+This dataset requires ~54GB of disk space for the download cache and produces a ~17GB training file. Ensure you have sufficient storage before running.
+</Warning>
+
+**Output:**
+- `train.bin`: ~17GB, 9,035,582,198 tokens
+- `val.bin`: ~8.5MB, 4,434,897 tokens
+
+**Processing:**
+1. Downloads OpenWebText from HuggingFace (8M documents)
+2. Creates 99.95%/0.05% train/val split with shuffling
+3. Tokenizes using GPT-2 BPE (parallelized with 8 workers)
+4. Appends end-of-text token (50256) to each document
+5. Writes tokens in batches using memory-mapped files
+
+<Info>
+The OpenWebText preparation is parallelized and uses `num_proc=8` workers by default. You can adjust this in the script based on your CPU cores.
+</Info>
+
+## Metadata Files
+
+### meta.pkl (Character-Level Only)
+
+Character-level datasets save encoding metadata:
+
+```python
+import pickle
+
+# Load metadata
+with open('data/shakespeare_char/meta.pkl', 'rb') as f:
+    meta = pickle.load(f)
+
+print(meta['vocab_size'])  # 65
+print(meta['itos'])        # {0: '\n', 1: ' ', 2: '!', ...}
+print(meta['stoi'])        # {'\n': 0, ' ': 1, '!': 2, ...}
+```
+
+This metadata is used during sampling to decode model outputs back to text.
+
+<Note>
+BPE-based datasets don't need `meta.pkl` because the tiktoken library provides encoding/decoding functions directly.
+</Note>
+
+## Usage in Training
+
+The training script loads prepared data using memory mapping:
+
+```python
+import numpy as np
+import os
+
+def get_batch(split, data_dir='data/shakespeare', block_size=256, batch_size=12):
+    # Memory-map the appropriate file
+    if split == 'train':
+        data = np.memmap(os.path.join(data_dir, 'train.bin'), 
+                         dtype=np.uint16, mode='r')
+    else:
+        data = np.memmap(os.path.join(data_dir, 'val.bin'), 
+                         dtype=np.uint16, mode='r')
+    
+    # Sample random sequences
+    ix = torch.randint(len(data) - block_size, (batch_size,))
+    x = torch.stack([torch.from_numpy(data[i:i+block_size].astype(np.int64)) 
+                     for i in ix])
+    y = torch.stack([torch.from_numpy(data[i+1:i+1+block_size].astype(np.int64)) 
+                     for i in ix])
+    
+    return x, y
+```
+
+Key points:
+- Memory mapping avoids loading entire dataset into RAM
+- Random sequences sampled on each batch
+- Labels (`y`) are inputs shifted by one token
+- Data converted from `uint16` to `int64` for PyTorch
+
+## Performance Considerations
+
+### Memory Efficiency
+
+<CodeGroup>
+
+```python Efficient (Memory-Mapped)
+import numpy as np
+
+# Only maps file to memory, doesn't load it
+data = np.memmap('train.bin', dtype=np.uint16, mode='r')
+sequence = data[1000:2000]  # Loads only this slice
+```
+
+```python Inefficient (Load All)
+import numpy as np
+
+# Loads entire file into RAM
+data = np.fromfile('train.bin', dtype=np.uint16)
+sequence = data[1000:2000]  # Already loaded everything
+```
+
+</CodeGroup>
+
+### Memory Leak Prevention
+
+The training loop recreates the memory map for each batch to prevent memory leaks:
+
+```python
+def get_batch(split):
+    # Recreate memmap each time (prevents leak)
+    data = np.memmap(path, dtype=np.uint16, mode='r')
+    # ... use data ...
+    # memmap automatically closed when function exits
+```
+
+<Info>
+This pattern is based on [this StackOverflow solution](https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122) for preventing NumPy memmap memory leaks.
+</Info>
+
+## Data Directory Structure
+
+After running preparation scripts, each dataset directory contains:
+
+```
+data/
+├── shakespeare_char/
+│   ├── prepare.py       # Preparation script
+│   ├── input.txt        # Raw text data (downloaded)
+│   ├── train.bin        # Training tokens (binary)
+│   ├── val.bin          # Validation tokens (binary)
+│   └── meta.pkl         # Character mappings
+├── shakespeare/
+│   ├── prepare.py
+│   ├── input.txt
+│   ├── train.bin
+│   └── val.bin
+└── openwebtext/
+    ├── prepare.py
+    ├── train.bin
+    └── val.bin
+```
+
+## Related Resources
+
+- [Supported Datasets](/api/datasets) - Available datasets and how to add custom ones
+- [Training Configuration](/training/configuration) - Configure dataset selection in training
+- [tiktoken Documentation](https://github.com/openai/tiktoken) - Learn more about GPT-2 BPE tokenization

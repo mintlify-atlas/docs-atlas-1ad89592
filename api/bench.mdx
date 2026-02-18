@@ -1,0 +1,294 @@
+---
+title: "bench.py"
+description: "Benchmark training performance and profile nanoGPT models"
+---
+
+## Overview
+
+The `bench.py` script is a simplified version of `train.py` designed specifically for benchmarking and profiling training performance. It runs a fixed number of training iterations and measures throughput and efficiency.
+
+## Usage
+
+<CodeGroup>
+```bash Simple Benchmark
+python bench.py
+```
+
+```bash Benchmark with Profiling
+python bench.py --profile=True
+```
+
+```bash Custom Batch Size
+python bench.py --batch_size=32 --block_size=512
+```
+
+```bash Benchmark Without Compilation
+python bench.py --compile=False
+```
+
+```bash Synthetic Data Benchmark
+python bench.py --real_data=False
+```
+</CodeGroup>
+
+## Configuration Parameters
+
+### Data Parameters
+
+<ParamField path="batch_size" type="integer" default="12">
+  Batch size for training
+</ParamField>
+
+<ParamField path="block_size" type="integer" default="1024">
+  Context length / sequence length
+</ParamField>
+
+<ParamField path="real_data" type="boolean" default="true">
+  Whether to use real data or synthetic random data:
+  - `true`: Load from `data/openwebtext/train.bin`
+  - `false`: Use randomly generated data (faster, no I/O overhead)
+</ParamField>
+
+### Model Parameters
+
+<ParamField path="bias" type="boolean" default="false">
+  Whether to use bias in LayerNorm and Linear layers
+</ParamField>
+
+<Note>
+The model architecture is fixed to GPT-2 small size (12 layers, 12 heads, 768 embedding dimension) for consistent benchmarking.
+</Note>
+
+### System Parameters
+
+<ParamField path="seed" type="integer" default="1337">
+  Random seed for reproducibility
+</ParamField>
+
+<ParamField path="device" type="string" default="cuda">
+  Device to use: `cpu`, `cuda`, `cuda:0`, `cuda:1`, etc.
+</ParamField>
+
+<ParamField path="dtype" type="string" default="bfloat16 or float16">
+  Data type for training: `float32`, `bfloat16`, or `float16`.
+  Default is `bfloat16` if supported, otherwise `float16`.
+</ParamField>
+
+<ParamField path="compile" type="boolean" default="true">
+  Use PyTorch 2.0 `torch.compile()` to optimize the model
+</ParamField>
+
+### Profiling Parameters
+
+<ParamField path="profile" type="boolean" default="false">
+  Enable PyTorch profiler for detailed performance analysis.
+  When enabled, profiler traces are saved to `./bench_log` directory.
+</ParamField>
+
+## Benchmark Modes
+
+### Simple Benchmarking (Default)
+
+When `profile=False`, the script runs two stages:
+
+1. **Burn-in (10 iterations)**: Warms up the GPU and compilation
+2. **Benchmark (20 iterations)**: Measures actual performance
+
+Output includes:
+- Time per iteration (ms)
+- Model Flops Utilization (MFU) percentage
+
+```bash Example Output
+0/10 loss: 10.9531
+1/10 loss: 10.9453
+...
+19/20 loss: 10.8125
+time per iteration: 234.5678ms, MFU: 45.23%
+```
+
+### Profiler Mode
+
+When `profile=True`, the script uses PyTorch's profiler with the following schedule:
+
+- **Wait**: 5 iterations (profiler inactive)
+- **Warmup**: 5 iterations (warmup phase)
+- **Active**: 5 iterations (active profiling)
+
+Total: 15 iterations
+
+<ParamField path="Profiler Activities" type="list">
+  - CPU profiling
+  - CUDA profiling
+  - FLOP counting (enabled)
+  - Shape recording (disabled for performance)
+  - Memory profiling (disabled for performance)
+  - Stack traces (disabled for performance)
+</ParamField>
+
+## Output and Analysis
+
+### TensorBoard Integration
+
+When profiling is enabled, traces are saved to `./bench_log` and can be viewed in TensorBoard:
+
+```bash
+tensorboard --logdir=bench_log
+```
+
+Then open http://localhost:6006 in your browser to visualize:
+- GPU utilization over time
+- Kernel execution timeline
+- Memory usage patterns
+- Operation breakdown by FLOPS
+
+### Model Flops Utilization (MFU)
+
+MFU measures how efficiently your GPU is being utilized compared to its theoretical peak performance:
+
+- **40-50% MFU**: Excellent for training (typical for well-optimized setups)
+- **30-40% MFU**: Good
+- **20-30% MFU**: Fair, room for optimization
+- **< 20% MFU**: Poor, likely bottlenecked by data loading or other issues
+
+<Note>
+MFU varies significantly based on GPU architecture, model size, batch size, and sequence length.
+</Note>
+
+## Example Workflows
+
+### Compare Data Types
+
+<CodeGroup>
+```bash FP32 Baseline
+python bench.py --dtype=float32 --compile=False
+```
+
+```bash BF16 Mixed Precision
+python bench.py --dtype=bfloat16 --compile=False
+```
+
+```bash FP16 Mixed Precision
+python bench.py --dtype=float16 --compile=False
+```
+</CodeGroup>
+
+### Evaluate torch.compile() Impact
+
+<CodeGroup>
+```bash Without Compilation
+python bench.py --compile=False
+```
+
+```bash With Compilation (PyTorch 2.0+)
+python bench.py --compile=True
+```
+</CodeGroup>
+
+<Note>
+The first run with `compile=True` will take longer due to compilation overhead. The performance benefit is visible in the benchmark phase.
+</Note>
+
+### Test Different Batch Sizes
+
+```bash
+for bs in 4 8 12 16 24 32; do
+  echo "\nBatch size: $bs"
+  python bench.py --batch_size=$bs --real_data=False
+done
+```
+
+### Profile for Optimization
+
+```bash
+python bench.py --profile=True --compile=True
+tensorboard --logdir=bench_log
+```
+
+In TensorBoard, look for:
+- Operations taking the most time
+- GPU idle periods
+- Memory allocation patterns
+- Opportunities for kernel fusion
+
+### Synthetic Data Benchmark
+
+For pure compute benchmarking without I/O overhead:
+
+```bash
+python bench.py --real_data=False
+```
+
+This generates random data on the GPU, eliminating data loading as a variable.
+
+## Performance Tips
+
+### Maximizing Throughput
+
+1. **Use appropriate batch size**: Larger batches increase GPU utilization but require more memory
+2. **Enable compilation**: `--compile=True` provides 20-30% speedup on PyTorch 2.0+
+3. **Use mixed precision**: `bfloat16` or `float16` for 2-3x speedup
+4. **Optimize sequence length**: Powers of 2 (512, 1024, 2048) often perform better
+
+### Memory Optimization
+
+<CodeGroup>
+```bash Reduce Batch Size
+python bench.py --batch_size=8
+```
+
+```bash Reduce Sequence Length
+python bench.py --block_size=512
+```
+
+```bash Both
+python bench.py --batch_size=8 --block_size=512
+```
+</CodeGroup>
+
+## Comparing with train.py
+
+`bench.py` differs from `train.py` in several ways:
+
+| Feature | bench.py | train.py |
+|---------|----------|----------|
+| Purpose | Benchmarking | Full training |
+| Iterations | Fixed (10+20 or 15) | Configurable (up to max_iters) |
+| Evaluation | None | Periodic eval on train/val |
+| Checkpointing | None | Saves checkpoints |
+| DDP Support | No | Yes |
+| Gradient Accumulation | No | Yes |
+| Learning Rate Decay | No | Yes (cosine with warmup) |
+| W&B Logging | No | Optional |
+| Data Loading | Simplified | Full featured |
+
+<Warning>
+The benchmark script is not suitable for actual model training. Use `train.py` for training runs.
+</Warning>
+
+## Interpreting Results
+
+### Good Performance Indicators
+
+- MFU > 40%
+- Consistent iteration times (low variance)
+- No CUDA out-of-memory errors
+- GPU utilization > 90% (check with `nvidia-smi`)
+
+### Red Flags
+
+- MFU < 20%
+- Highly variable iteration times
+- Frequent memory warnings
+- Low GPU utilization
+
+These may indicate:
+- Data loading bottlenecks (try `real_data=False` to test)
+- Inefficient hyperparameters
+- Hardware issues
+- Need for kernel optimization
+
+## See Also
+
+- [Training Script](/api/train) - Full training with all features
+- [Sample Script](/api/sample) - Generate text from models
+- [Model Architecture](/model/architecture) - GPT implementation details

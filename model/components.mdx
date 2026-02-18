@@ -1,0 +1,455 @@
+---
+title: 'Model Components'
+description: 'Core building blocks of the GPT architecture'
+icon: 'cube'
+---
+
+## Overview
+
+The GPT model is composed of several modular components that work together to form the transformer architecture. This page documents each component in detail.
+
+## LayerNorm
+
+A custom Layer Normalization implementation that supports optional bias.
+
+### Implementation
+
+```python
+class LayerNorm(nn.Module):
+    """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
+
+    def __init__(self, ndim, bias):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(ndim))
+        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
+
+    def forward(self, input):
+        return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
+```
+
+### Parameters
+
+<ParamField path="ndim" type="int" required>
+  The dimensionality of the input features (typically `n_embd`).
+</ParamField>
+
+<ParamField path="bias" type="bool" required>
+  Whether to include a learnable bias parameter. Set to `False` for improved efficiency.
+</ParamField>
+
+### Why Custom LayerNorm?
+
+<Info>
+PyTorch's built-in `nn.LayerNorm` always includes a bias term. This custom implementation allows disabling bias for better performance and reduced memory usage.
+</Info>
+
+### Usage Example
+
+```python
+# With bias (default GPT-2 behavior)
+ln_with_bias = LayerNorm(ndim=768, bias=True)
+
+# Without bias (more efficient)
+ln_no_bias = LayerNorm(ndim=768, bias=False)
+
+# Forward pass
+x = torch.randn(32, 128, 768)  # (batch, seq_len, n_embd)
+output = ln_with_bias(x)  # Normalized output with same shape
+```
+
+---
+
+## CausalSelfAttention
+
+Multi-head causal self-attention mechanism with Flash Attention support.
+
+### Implementation
+
+```python
+class CausalSelfAttention(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        assert config.n_embd % config.n_head == 0
+        # key, query, value projections for all heads, but in a batch
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        # output projection
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        # regularization
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.resid_dropout = nn.Dropout(config.dropout)
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.dropout = config.dropout
+        # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
+        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        if not self.flash:
+            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+            # causal mask to ensure that attention is only applied to the left in the input sequence
+            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
+                                        .view(1, 1, config.block_size, config.block_size))
+```
+
+### Key Features
+
+<Tabs>
+  <Tab title="Causal Masking">
+    The attention mechanism is **causal**, meaning position `i` can only attend to positions `<= i`:
+    
+    ```python
+    # Manual attention with causal mask
+    att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+    att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+    att = F.softmax(att, dim=-1)
+    ```
+    
+    This prevents the model from "cheating" by looking at future tokens.
+  </Tab>
+  
+  <Tab title="Multi-Head Attention">
+    The input is split into multiple attention heads:
+    
+    ```python
+    # Split into heads
+    k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+    q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+    v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+    # Shape: (batch, n_head, seq_len, head_dim)
+    ```
+    
+    Each head learns to attend to different aspects of the input.
+  </Tab>
+  
+  <Tab title="Flash Attention">
+    When PyTorch >= 2.0, uses optimized Flash Attention:
+    
+    ```python
+    if self.flash:
+        y = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v, 
+            attn_mask=None, 
+            dropout_p=self.dropout if self.training else 0, 
+            is_causal=True
+        )
+    ```
+    
+    <Note>
+    Flash Attention provides significant speedups (2-4x) with no quality loss.
+    </Note>
+  </Tab>
+</Tabs>
+
+### Forward Pass
+
+```python
+def forward(self, x):
+    B, T, C = x.size()  # batch size, sequence length, embedding dimensionality
+
+    # Calculate query, key, values for all heads in batch
+    q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+    k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+    q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+    v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+
+    # Causal self-attention
+    if self.flash:
+        y = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v, attn_mask=None, 
+            dropout_p=self.dropout if self.training else 0, 
+            is_causal=True
+        )
+    else:
+        # Manual implementation
+        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+        att = F.softmax(att, dim=-1)
+        att = self.attn_dropout(att)
+        y = att @ v
+    
+    # Re-assemble all head outputs side by side
+    y = y.transpose(1, 2).contiguous().view(B, T, C)
+
+    # Output projection
+    y = self.resid_dropout(self.c_proj(y))
+    return y
+```
+
+### Attention Computation
+
+The attention mechanism computes weighted combinations of values:
+
+1. **Project to Q, K, V**: `c_attn` projects input to queries, keys, and values
+2. **Split into heads**: Reshape to separate attention heads
+3. **Compute attention scores**: `Q @ K^T / sqrt(head_dim)`
+4. **Apply causal mask**: Set future positions to -inf
+5. **Softmax**: Convert scores to probabilities
+6. **Apply to values**: Weighted sum of values
+7. **Concatenate heads**: Merge heads back together
+8. **Output projection**: Final linear transformation
+
+---
+
+## MLP
+
+Position-wise feedforward network with GELU activation.
+
+### Implementation
+
+```python
+class MLP(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        self.gelu    = nn.GELU()
+        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x):
+        x = self.c_fc(x)
+        x = self.gelu(x)
+        x = self.c_proj(x)
+        x = self.dropout(x)
+        return x
+```
+
+### Architecture
+
+The MLP is a simple two-layer feedforward network:
+
+```
+Input (n_embd) 
+    ↓
+Linear (4 * n_embd)  ← Expansion layer
+    ↓
+GELU activation
+    ↓
+Linear (n_embd)      ← Projection layer
+    ↓
+Dropout
+    ↓
+Output (n_embd)
+```
+
+### Key Characteristics
+
+<Accordion title="4x Expansion Ratio">
+  The hidden layer expands to `4 * n_embd` dimensions:
+  
+  - Standard in transformer architectures
+  - Provides capacity for complex non-linear transformations
+  - For GPT-2 (n_embd=768): 768 → 3072 → 768
+  
+  ```python
+  self.c_fc = nn.Linear(768, 3072)   # Expansion
+  self.c_proj = nn.Linear(3072, 768)  # Projection back
+  ```
+</Accordion>
+
+<Accordion title="GELU Activation">
+  Uses Gaussian Error Linear Unit (GELU) instead of ReLU:
+  
+  - Smoother than ReLU
+  - Better gradient flow
+  - Standard in modern transformer models
+  
+  <Info>
+  GELU is defined as: `x * Φ(x)` where Φ(x) is the cumulative distribution function of the standard normal distribution.
+  </Info>
+</Accordion>
+
+<Accordion title="Position-wise Processing">
+  The MLP processes each position independently:
+  
+  ```python
+  # Input shape: (batch, seq_len, n_embd)
+  # Same MLP applied to each position
+  x = mlp(x)  # Output shape: (batch, seq_len, n_embd)
+  ```
+  
+  No interaction between sequence positions (that's the attention's job).
+</Accordion>
+
+### Usage Example
+
+```python
+config = GPTConfig(n_embd=768, dropout=0.1, bias=False)
+mlp = MLP(config)
+
+# Forward pass
+x = torch.randn(32, 128, 768)  # (batch, seq_len, n_embd)
+output = mlp(x)  # Same shape: (32, 128, 768)
+```
+
+---
+
+## Block
+
+A complete transformer block combining attention and feedforward layers.
+
+### Implementation
+
+```python
+class Block(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.attn = CausalSelfAttention(config)
+        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.mlp = MLP(config)
+
+    def forward(self, x):
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
+        return x
+```
+
+### Architecture
+
+Each transformer block follows this pattern:
+
+```
+Input
+  ↓
+LayerNorm (ln_1)
+  ↓
+CausalSelfAttention
+  ↓
+Residual Connection (+)
+  ↓
+LayerNorm (ln_2)
+  ↓
+MLP
+  ↓
+Residual Connection (+)
+  ↓
+Output
+```
+
+### Pre-Normalization
+
+The block uses **pre-normalization** (LayerNorm before sublayers):
+
+```python
+x = x + self.attn(self.ln_1(x))  # Norm → Attention → Residual
+x = x + self.mlp(self.ln_2(x))   # Norm → MLP → Residual
+```
+
+<Info>
+**Pre-norm vs Post-norm:**
+
+- **Pre-norm** (used here): More stable training, especially for deep models
+- **Post-norm**: Original transformer design, can be harder to train
+</Info>
+
+### Residual Connections
+
+Residual connections (skip connections) are crucial for training deep networks:
+
+<Tabs>
+  <Tab title="Benefits">
+    1. **Gradient flow**: Allows gradients to flow directly through the network
+    2. **Training stability**: Prevents vanishing gradients in deep models
+    3. **Identity mapping**: Model can learn to skip layers if needed
+  </Tab>
+  
+  <Tab title="Implementation">
+    ```python
+    # Before attention
+    residual = x
+    x = self.ln_1(x)
+    x = self.attn(x)
+    x = residual + x  # Add back the input
+    
+    # Before MLP
+    residual = x
+    x = self.ln_2(x)
+    x = self.mlp(x)
+    x = residual + x  # Add back the input
+    ```
+  </Tab>
+  
+  <Tab title="Math">
+    For a function F (attention or MLP):
+    
+    ```
+    Output = Input + F(LayerNorm(Input))
+    ```
+    
+    This allows the output to be close to the input if F learns to be near zero.
+  </Tab>
+</Tabs>
+
+### Usage Example
+
+```python
+config = GPTConfig(n_layer=12, n_head=12, n_embd=768)
+
+# Create a single block
+block = Block(config)
+
+# Forward pass
+x = torch.randn(32, 128, 768)  # (batch, seq_len, n_embd)
+output = block(x)  # Same shape: (32, 128, 768)
+
+# Stack multiple blocks (as done in GPT)
+blocks = nn.ModuleList([Block(config) for _ in range(12)])
+for block in blocks:
+    x = block(x)
+```
+
+## Component Interactions
+
+Here's how all components work together in a single transformer block:
+
+<Accordion title="Data Flow Example">
+  ```python
+  # Input: (batch=2, seq_len=10, n_embd=768)
+  x = torch.randn(2, 10, 768)
+  
+  # Block processing
+  residual_1 = x
+  x = ln_1(x)                    # LayerNorm: (2, 10, 768)
+  x = causal_self_attention(x)   # Attention: (2, 10, 768)
+  x = x + residual_1             # Residual: (2, 10, 768)
+  
+  residual_2 = x
+  x = ln_2(x)                    # LayerNorm: (2, 10, 768)
+  x = mlp(x)                     # MLP: (2, 10, 768)
+  x = x + residual_2             # Residual: (2, 10, 768)
+  
+  # Output: (2, 10, 768)
+  ```
+</Accordion>
+
+## Performance Considerations
+
+### Memory Usage
+
+- **Attention**: O(sequence_length²) memory for attention matrix
+- **MLP**: O(4 × n_embd) memory for hidden layer
+- **Activations**: Stored for backpropagation
+
+### Optimization Tips
+
+<Note>
+1. **Flash Attention**: Use PyTorch >= 2.0 for automatic speedups
+2. **No bias**: Set `bias=False` for 10-15% speedup
+3. **Gradient checkpointing**: Trade compute for memory on large models
+4. **Mixed precision**: Use `torch.cuda.amp` for faster training
+</Note>
+
+### Bottlenecks
+
+```python
+# Attention is quadratic in sequence length
+# Cost: O(n² * d) where n=seq_len, d=n_embd
+attention_cost = seq_len ** 2 * n_embd
+
+# MLP is linear in sequence length
+# Cost: O(n * d²) where n=seq_len, d=n_embd
+mlp_cost = seq_len * (n_embd ** 2) * 4
+```
+
+For typical values (seq_len=1024, n_embd=768), MLP dominates the compute.

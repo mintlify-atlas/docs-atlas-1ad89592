@@ -1,0 +1,320 @@
+---
+title: 'Benchmarking and Profiling'
+description: 'Measure performance and profile your training runs'
+---
+
+## Overview
+
+The `bench.py` script is designed for simple model benchmarking and profiling. It contains the core training loop from `train.py` but omits much of the complexity, making it ideal for measuring performance and identifying bottlenecks.
+
+<Note>
+`bench.py` is useful for measuring raw training iteration speed and model efficiency without the overhead of data loading, logging, and checkpointing.
+</Note>
+
+## Basic Benchmarking
+
+Run a simple benchmark with default settings:
+
+```bash
+python bench.py
+```
+
+This will:
+1. Initialize a GPT model (12 layers, 12 heads, 768 embedding size)
+2. Run 10 iterations as burn-in
+3. Run 20 iterations for benchmarking
+4. Report time per iteration and Model FLOPs Utilization (MFU)
+
+## Configuration Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `batch_size` | `12` | Number of sequences per batch |
+| `block_size` | `1024` | Context size (sequence length) |
+| `bias` | `False` | Whether to use bias in LayerNorm and Linear layers |
+| `real_data` | `True` | Use real OpenWebText data vs random data |
+| `seed` | `1337` | Random seed for reproducibility |
+| `device` | `cuda` | Device to run on (`cpu`, `cuda`, `cuda:0`, etc.) |
+| `dtype` | `bfloat16`/`float16` | Data type for computation |
+| `compile` | `True` | Use PyTorch 2.0 to compile the model |
+| `profile` | `False` | Use PyTorch profiler for detailed analysis |
+
+<Tip>
+Override parameters from command line:
+```bash
+python bench.py --batch_size=8 --compile=True --device=cuda
+```
+</Tip>
+
+## Simple Benchmarking Mode
+
+By default, `bench.py` runs in simple benchmarking mode (`profile=False`):
+
+<CodeGroup>
+
+```bash Default GPU
+python bench.py
+```
+
+```bash Larger Batch
+python bench.py --batch_size=16
+```
+
+```bash CPU Testing
+python bench.py --device=cpu --compile=False
+```
+
+```bash Different Precision
+python bench.py --dtype=float32
+```
+
+</CodeGroup>
+
+### Understanding Output
+
+Example output:
+```
+Compiling model...
+0/10 loss: 10.9821
+1/10 loss: 10.9645
+...
+9/10 loss: 10.8234
+0/20 loss: 10.8156
+1/20 loss: 10.7923
+...
+19/20 loss: 10.5432
+time per iteration: 135.2451ms, MFU: 42.37%
+```
+
+**Key Metrics:**
+- **Time per iteration**: Milliseconds per training step (lower is better)
+- **MFU (Model FLOPs Utilization)**: Percentage of theoretical peak FLOPS achieved (higher is better)
+
+<Note>
+MFU measures how efficiently your hardware is being utilized. Values of 40-50% are typical for well-optimized training runs.
+</Note>
+
+## Advanced Profiling Mode
+
+Enable PyTorch's detailed profiler for in-depth analysis:
+
+```bash
+python bench.py --profile=True
+```
+
+This generates detailed profiling data in the `./bench_log` directory that can be visualized with TensorBoard.
+
+### Profiler Configuration
+
+When `profile=True`, the script:
+- Records CPU and CUDA activities
+- Runs warmup, wait, and active profiling phases (5 steps each)
+- Generates trace files with FLOPS information
+- Outputs data to `./bench_log/`
+
+### Viewing Profiler Results
+
+<Steps>
+  <Step title="Run with profiling">
+    ```bash
+    python bench.py --profile=True
+    ```
+  </Step>
+
+  <Step title="Launch TensorBoard">
+    ```bash
+    tensorboard --logdir=./bench_log
+    ```
+  </Step>
+
+  <Step title="Open in browser">
+    Navigate to `http://localhost:6006` to view the profiler results.
+  </Step>
+</Steps>
+
+<Tip>
+The profiler helps identify performance bottlenecks like:
+- Slow operators
+- CPU-GPU synchronization issues
+- Memory bandwidth limitations
+- Kernel launch overhead
+</Tip>
+
+## Real Data vs Synthetic Data
+
+### Using Real Data (Default)
+
+```bash
+python bench.py --real_data=True
+```
+
+Loads actual OpenWebText data from `data/openwebtext/train.bin`. This tests realistic data loading performance but requires the dataset to be prepared first.
+
+### Using Synthetic Data
+
+```bash
+python bench.py --real_data=False
+```
+
+Uses randomly generated token IDs. This isolates model and compute performance from data loading overhead.
+
+<Warning>
+You must prepare the OpenWebText dataset first if using `real_data=True`:
+```bash
+python data/openwebtext/prepare.py
+```
+</Warning>
+
+## PyTorch 2.0 Compilation
+
+The `bench.py` script defaults to using PyTorch 2.0's `torch.compile()` feature:
+
+```python
+if compile:
+    print("Compiling model...")
+    model = torch.compile(model)
+```
+
+### Performance Impact
+
+PyTorch 2.0 compilation can significantly improve performance:
+- **Without compile**: ~250ms per iteration
+- **With compile**: ~135ms per iteration
+- **Improvement**: ~46% faster
+
+<CodeGroup>
+
+```bash With Compilation (Default)
+python bench.py --compile=True
+```
+
+```bash Without Compilation
+python bench.py --compile=False
+```
+
+</CodeGroup>
+
+## Benchmarking Different Model Sizes
+
+You can modify `bench.py` to test different model configurations:
+
+<CodeGroup>
+
+```python GPT-2 Small (124M)
+gptconf = GPTConfig(
+    block_size = 1024,
+    n_layer = 12, 
+    n_head = 12, 
+    n_embd = 768,
+    dropout = 0,
+    bias = False,
+)
+```
+
+```python GPT-2 Medium (350M)
+gptconf = GPTConfig(
+    block_size = 1024,
+    n_layer = 24, 
+    n_head = 16, 
+    n_embd = 1024,
+    dropout = 0,
+    bias = False,
+)
+```
+
+```python GPT-2 Large (774M)
+gptconf = GPTConfig(
+    block_size = 1024,
+    n_layer = 36, 
+    n_head = 20, 
+    n_embd = 1280,
+    dropout = 0,
+    bias = False,
+)
+```
+
+</CodeGroup>
+
+## Interpreting Results
+
+### Time per Iteration
+
+The iteration time includes:
+- Forward pass through the model
+- Loss computation
+- Backward pass (gradient computation)
+- Optimizer step
+
+**Typical values:**
+- Small model (124M) on A100: 100-150ms
+- Medium model (350M) on A100: 250-350ms
+- Large model (774M) on A100: 500-700ms
+
+### Model FLOPs Utilization (MFU)
+
+MFU represents the percentage of your hardware's peak theoretical FLOPS being utilized:
+
+```
+MFU = (Actual FLOPS) / (Peak Hardware FLOPS) × 100%
+```
+
+**Target MFU values:**
+- 40-50%: Good efficiency
+- 30-40%: Room for optimization
+- &lt;30%: Significant bottlenecks present
+
+<Note>
+The `model.estimate_mfu()` method calculates MFU based on the model size, batch size, sequence length, and measured wall-clock time.
+</Note>
+
+## Best Practices
+
+<Steps>
+  <Step title="Always run burn-in">
+    The first few iterations include compilation and warmup overhead. The script automatically runs 10 burn-in iterations before the 20 benchmark iterations.
+  </Step>
+
+  <Step title="Use consistent settings">
+    When comparing different configurations, keep other parameters constant to isolate the impact of changes.
+  </Step>
+
+  <Step title="Monitor GPU utilization">
+    Use `nvidia-smi` or similar tools to ensure GPU is fully utilized:
+    ```bash
+    watch -n 1 nvidia-smi
+    ```
+  </Step>
+
+  <Step title="Test with and without compile">
+    Compare performance with PyTorch 2.0 compilation enabled vs disabled to measure its impact.
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+### CUDA Out of Memory
+
+Reduce batch size or block size:
+```bash
+python bench.py --batch_size=8 --block_size=512
+```
+
+### Slow Performance on CPU
+
+This is expected. For CPU testing, use smaller models:
+```bash
+python bench.py --device=cpu --compile=False --batch_size=4 --block_size=256
+```
+
+### Profiler Issues
+
+If profiling fails, ensure you have compatible PyTorch and CUDA versions:
+```bash
+python -c "import torch; print(torch.__version__)"
+```
+
+## Further Reading
+
+For more context on PyTorch profiling:
+- [PyTorch Profiler Tutorial](https://pytorch.org/tutorials/intermediate/tensorboard_profiler_tutorial.html)
+- [PyTorch Profiler API](https://pytorch.org/docs/stable/profiler.html)

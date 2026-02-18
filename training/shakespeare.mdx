@@ -1,0 +1,458 @@
+---
+title: "Character-Level Shakespeare Training"
+description: "Complete guide to training a character-level GPT on Shakespeare's works"
+---
+
+## Overview
+
+The Shakespeare character-level model is the perfect introduction to nanoGPT. It trains quickly (3 minutes on a GPU), requires minimal resources, and produces entertaining results. This guide walks through the complete process from data preparation to sampling.
+
+<Info>
+This is the recommended starting point for newcomers to get familiar with the nanoGPT workflow.
+</Info>
+
+## Quick Start
+
+For the impatient, here's the complete workflow:
+
+```bash
+# 1. Prepare the dataset
+python data/shakespeare_char/prepare.py
+
+# 2. Train the model
+python train.py config/train_shakespeare_char.py
+
+# 3. Generate samples
+python sample.py --out_dir=out-shakespeare-char
+```
+
+## Step 1: Data Preparation
+
+<Steps>
+  <Step title="Download and Prepare Data">
+    The preparation script downloads Shakespeare's complete works (~1MB) and converts it to token IDs:
+
+    ```bash
+    python data/shakespeare_char/prepare.py
+    ```
+
+    This creates:
+    - `data/shakespeare_char/train.bin` - Training split (90%)
+    - `data/shakespeare_char/val.bin` - Validation split (10%)
+    - `data/shakespeare_char/meta.pkl` - Vocabulary metadata
+  </Step>
+
+  <Step title="Verify Data Files">
+    Check that the files were created:
+
+    ```bash
+    ls -lh data/shakespeare_char/
+    # Should show train.bin, val.bin, and meta.pkl
+    ```
+  </Step>
+</Steps>
+
+<Note>
+Character-level tokenization means each character is a separate token. The vocabulary size is typically 65-100 characters (letters, punctuation, etc.).
+</Note>
+
+## Step 2: Training Configuration
+
+The training uses the configuration file `config/train_shakespeare_char.py`:
+
+```python
+# train a miniature character-level shakespeare model
+# good for debugging and playing on macbooks and such
+
+out_dir = 'out-shakespeare-char'
+eval_interval = 250  # keep frequent because we'll overfit
+eval_iters = 200
+log_interval = 10  # don't print too too often
+
+# we expect to overfit on this small dataset, so only save when val improves
+always_save_checkpoint = False
+
+wandb_log = False  # override via command line if you like
+wandb_project = 'shakespeare-char'
+wandb_run_name = 'mini-gpt'
+
+dataset = 'shakespeare_char'
+gradient_accumulation_steps = 1
+batch_size = 64
+block_size = 256  # context of up to 256 previous characters
+
+# baby GPT model :)
+n_layer = 6
+n_head = 6
+n_embd = 384
+dropout = 0.2
+
+learning_rate = 1e-3  # with baby networks can afford to go a bit higher
+max_iters = 5000
+lr_decay_iters = 5000  # make equal to max_iters usually
+min_lr = 1e-4  # learning_rate / 10 usually
+beta2 = 0.99  # make a bit bigger because number of tokens per iter is small
+
+warmup_iters = 100  # not super necessary potentially
+```
+
+### Model Architecture
+
+The "baby GPT" configuration:
+- **6 layers** - Small but capable
+- **6 attention heads** - One per layer
+- **384 embedding dimensions** - Compact representation
+- **256 context length** - Can look back 256 characters
+- **~10M parameters** - Fits easily in memory
+
+### Training Hyperparameters
+
+- **Learning rate**: `1e-3` (higher than GPT-2, suitable for small models)
+- **Dropout**: `0.2` (helps prevent overfitting on small dataset)
+- **Batch size**: `64` (no gradient accumulation needed)
+- **Max iterations**: `5000` (enough to learn patterns)
+
+## Step 3: Training on GPU
+
+<Tabs>
+  <Tab title="Single GPU (A100)">
+    Train with the default configuration:
+
+    ```bash
+    python train.py config/train_shakespeare_char.py
+    ```
+
+    **Expected output:**
+    ```
+    Overriding config with config/train_shakespeare_char.py:
+    tokens per iteration will be: 16,384
+    Initializing a new model from scratch
+    found vocab_size = 65 (inside data/shakespeare_char/meta.pkl)
+    compiling the model... (takes a ~minute)
+    iter 0: loss 4.2341, time 312.45ms, mfu 0.00%
+    iter 10: loss 2.7234, time 145.32ms, mfu 31.24%
+    step 250: train loss 1.5234, val loss 1.6123
+    iter 500: loss 1.3456, time 138.21ms, mfu 34.12%
+    step 1000: train loss 1.2890, val loss 1.4234
+    ...
+    step 5000: train loss 1.0123, val loss 1.4697
+    ```
+
+    **Training time**: ~3 minutes on A100  
+    **Final validation loss**: ~1.47  
+    **Checkpoint location**: `out-shakespeare-char/ckpt.pt`
+  </Tab>
+
+  <Tab title="Consumer GPU">
+    For GPUs with less memory (RTX 3060, etc.):
+
+    ```bash
+    python train.py config/train_shakespeare_char.py \
+      --batch_size=32 \
+      --n_embd=256
+    ```
+
+    This reduces memory usage while still producing good results.
+  </Tab>
+
+  <Tab title="Apple Silicon (MPS)">
+    On M1/M2/M3 Macs, use the Metal Performance Shaders backend:
+
+    ```bash
+    python train.py config/train_shakespeare_char.py \
+      --device=mps
+    ```
+
+    **Expected speedup**: 2-3x faster than CPU  
+    **Training time**: ~10-15 minutes
+
+    <Note>
+    Make sure you have a recent PyTorch version with MPS support.
+    </Note>
+  </Tab>
+</Tabs>
+
+## Step 4: Training on CPU
+
+For systems without a GPU:
+
+```bash
+python train.py config/train_shakespeare_char.py \
+  --device=cpu \
+  --compile=False \
+  --eval_iters=20 \
+  --log_interval=1 \
+  --block_size=64 \
+  --batch_size=12 \
+  --n_layer=4 \
+  --n_head=4 \
+  --n_embd=128 \
+  --max_iters=2000 \
+  --lr_decay_iters=2000 \
+  --dropout=0.0
+```
+
+### CPU Configuration Explained
+
+<CodeGroup>
+```bash Key Changes
+--device=cpu          # Run on CPU
+--compile=False       # Disable torch.compile (not supported on CPU)
+--eval_iters=20       # Faster but noisier validation
+--block_size=64       # Shorter context (256 → 64)
+--batch_size=12       # Smaller batches (64 → 12)
+--n_layer=4           # Fewer layers (6 → 4)
+--n_head=4            # Fewer heads (6 → 4)
+--n_embd=128          # Smaller embeddings (384 → 128)
+--max_iters=2000      # Shorter training (5000 → 2000)
+--dropout=0.0         # Less regularization for tiny model
+```
+
+```bash Results
+# Training time: ~3 minutes on modern CPU
+# Final validation loss: ~1.88 (worse than GPU, but still fun)
+# Model size: ~2M parameters
+```
+</CodeGroup>
+
+## Step 5: Monitoring Training
+
+### Console Output
+
+Key metrics to watch:
+
+```bash
+iter 100: loss 2.3456, time 142.31ms, mfu 32.45%
+#    ^^^         ^^^^             ^^^        ^^^^
+#    |           |                |          Model FLOPs Utilization
+#    |           |                Time per iteration
+#    |           Training loss (decreasing is good)
+#    Iteration number
+
+step 250: train loss 1.5234, val loss 1.6123
+#                ^^^^              ^^^^^
+#                Training loss     Validation loss (should be close)
+```
+
+### Using Weights & Biases
+
+Enable W&B logging for visualization:
+
+```bash
+python train.py config/train_shakespeare_char.py --wandb_log=True
+```
+
+This logs:
+- Loss curves (train and validation)
+- Learning rate schedule
+- MFU over time
+
+<Warning>
+On the small Shakespeare dataset, overfitting is expected. The validation loss will be slightly higher than training loss.
+</Warning>
+
+## Step 6: Generating Samples
+
+Once training completes, generate Shakespeare-like text:
+
+```bash
+python sample.py --out_dir=out-shakespeare-char
+```
+
+### Sample Output
+
+**Example 1** (GPU-trained model, val loss ~1.47):
+
+```text
+ANGELO:
+And cowards it be strawn to my bed,
+And thrust the gates of my threats,
+Because he that ale away, and hang'd
+An one with him.
+
+DUKE VINCENTIO:
+I thank your eyes against it.
+
+DUKE VINCENTIO:
+Then will answer him to save the malm:
+And what have you tyrannous shall do this?
+
+DUKE VINCENTIO:
+If you have done evils of all disposition
+To end his power, the day of thrust for a common men
+That I leave, to fight with over-liking
+Hasting in a roseman.
+```
+
+**Example 2** (CPU-trained model, val loss ~1.88):
+
+```text
+GLEORKEN VINGHARD III:
+Whell's the couse, the came light gacks,
+And the for mought you in Aut fries the not high shee
+bot thou the sought bechive in that to doth groan you,
+No relving thee post mose the wear
+```
+
+<Note>
+The model captures the character-level structure, formatting (character names, colons), and even some Shakespeare-like vocabulary and phrasing!
+</Note>
+
+### Advanced Sampling Options
+
+<CodeGroup>
+```bash Custom Prompt
+python sample.py \
+  --out_dir=out-shakespeare-char \
+  --start="ROMEO:" \
+  --num_samples=3 \
+  --max_new_tokens=200
+```
+
+```bash From File
+echo "JULIET:" > prompt.txt
+python sample.py \
+  --out_dir=out-shakespeare-char \
+  --start=FILE:prompt.txt
+```
+
+```bash Temperature Control
+python sample.py \
+  --out_dir=out-shakespeare-char \
+  --temperature=0.8 \
+  --top_k=40
+```
+</CodeGroup>
+
+## Customization Ideas
+
+### Experiment with Hyperparameters
+
+Try different configurations to see their effects:
+
+<Tabs>
+  <Tab title="Larger Model">
+    ```bash
+    python train.py config/train_shakespeare_char.py \
+      --n_layer=8 \
+      --n_head=8 \
+      --n_embd=512 \
+      --max_iters=10000
+    ```
+    
+    Larger model, longer training → better results
+  </Tab>
+
+  <Tab title="Longer Context">
+    ```bash
+    python train.py config/train_shakespeare_char.py \
+      --block_size=512 \
+      --batch_size=32
+    ```
+    
+    Longer context → better long-range coherence
+  </Tab>
+
+  <Tab title="More Regularization">
+    ```bash
+    python train.py config/train_shakespeare_char.py \
+      --dropout=0.3 \
+      --weight_decay=0.1
+    ```
+    
+    More regularization → less overfitting
+  </Tab>
+</Tabs>
+
+### Train on Your Own Text
+
+<Steps>
+  <Step title="Prepare Your Dataset">
+    Create a new directory with your text:
+    
+    ```bash
+    mkdir -p data/my_text
+    # Copy your text file to data/my_text/input.txt
+    ```
+  </Step>
+
+  <Step title="Create Preparation Script">
+    Adapt `data/shakespeare_char/prepare.py` for your data:
+    
+    ```python
+    # Read your input file
+    with open('input.txt', 'r') as f:
+        data = f.read()
+    print(f"length of dataset in characters: {len(data):,}")
+    
+    # Get unique characters
+    chars = sorted(list(set(data)))
+    vocab_size = len(chars)
+    # ... rest of the preparation code
+    ```
+  </Step>
+
+  <Step title="Train on Your Data">
+    ```bash
+    python train.py config/train_shakespeare_char.py \
+      --dataset=my_text \
+      --out_dir=out-my-text
+    ```
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+### Out of Memory
+
+<Warning>
+If you see CUDA out of memory errors:
+</Warning>
+
+```bash
+# Reduce batch size
+python train.py config/train_shakespeare_char.py --batch_size=32
+
+# OR reduce model size
+python train.py config/train_shakespeare_char.py --n_embd=256 --n_layer=4
+
+# OR reduce context length
+python train.py config/train_shakespeare_char.py --block_size=128
+```
+
+### torch.compile Errors
+
+On Windows or older systems:
+
+```bash
+python train.py config/train_shakespeare_char.py --compile=False
+```
+
+### Loss Not Decreasing
+
+Check your learning rate:
+
+```bash
+# Try lower learning rate
+python train.py config/train_shakespeare_char.py --learning_rate=5e-4
+
+# Or higher for very small models
+python train.py config/train_shakespeare_char.py --learning_rate=3e-3
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Finetune GPT-2" icon="wand-magic-sparkles" href="/training/gpt2-reproduction">
+    Get better results by finetuning a pretrained GPT-2 model
+  </Card>
+  <Card title="Distributed Training" icon="server" href="/training/distributed">
+    Scale up with multi-GPU training
+  </Card>
+  <Card title="Configuration System" icon="gear" href="/training/configuration">
+    Learn the configurator in depth
+  </Card>
+  <Card title="Sampling Guide" icon="magic" href="/usage/sampling">
+    Advanced sampling techniques
+  </Card>
+</CardGroup>

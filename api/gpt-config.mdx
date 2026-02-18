@@ -1,0 +1,241 @@
+---
+title: 'GPTConfig'
+description: 'Configuration dataclass for GPT model hyperparameters'
+---
+
+# GPTConfig
+
+A dataclass that stores hyperparameters for the GPT model architecture.
+
+## Overview
+
+`GPTConfig` is a Python dataclass decorated with `@dataclass` that provides a convenient way to configure GPT model instances. All parameters have sensible defaults matching the base GPT-2 architecture.
+
+```python
+from dataclasses import dataclass
+
+@dataclass
+class GPTConfig:
+    block_size: int = 1024
+    vocab_size: int = 50304
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
+    dropout: float = 0.0
+    bias: bool = True
+```
+
+## Parameters
+
+### `block_size`
+
+<ParamField path="block_size" type="int" default="1024">
+  Maximum sequence length (context window) the model can process. Determines the size of position embeddings and attention masks.
+</ParamField>
+
+<Note>
+Sequences longer than `block_size` will be truncated or need to be processed in chunks.
+</Note>
+
+**Typical values:**
+- GPT-2: 1024
+- Custom smaller models: 256, 512
+- Custom larger models: 2048, 4096
+
+### `vocab_size`
+
+<ParamField path="vocab_size" type="int" default="50304">
+  Size of the vocabulary (number of unique tokens). Default is 50304, which is GPT-2's vocab_size of 50257 padded to the nearest multiple of 64 for efficiency.
+</ParamField>
+
+<Note>
+Padding vocabulary size to multiples of 64 can improve GPU utilization and training speed.
+</Note>
+
+**Common values:**
+- GPT-2: 50257 (or 50304 padded)
+- Custom vocabularies: Typically 1000-100000 depending on tokenizer
+
+### `n_layer`
+
+<ParamField path="n_layer" type="int" default="12">
+  Number of transformer blocks (layers) in the model. More layers increase model capacity but also computational cost.
+</ParamField>
+
+**GPT-2 variants:**
+- GPT-2 (small): 12 layers → 124M params
+- GPT-2-medium: 24 layers → 350M params
+- GPT-2-large: 36 layers → 774M params
+- GPT-2-xl: 48 layers → 1558M params
+
+### `n_head`
+
+<ParamField path="n_head" type="int" default="12">
+  Number of attention heads in each transformer block. Must evenly divide `n_embd`.
+</ParamField>
+
+<Note>
+`n_embd` must be divisible by `n_head`. Each attention head processes `n_embd // n_head` dimensions.
+</Note>
+
+**GPT-2 variants:**
+- GPT-2 (small): 12 heads
+- GPT-2-medium: 16 heads
+- GPT-2-large: 20 heads
+- GPT-2-xl: 25 heads
+
+### `n_embd`
+
+<ParamField path="n_embd" type="int" default="768">
+  Embedding dimension / hidden size of the model. This is the dimensionality of token and position embeddings, and the hidden states throughout the network.
+</ParamField>
+
+**GPT-2 variants:**
+- GPT-2 (small): 768
+- GPT-2-medium: 1024
+- GPT-2-large: 1280
+- GPT-2-xl: 1600
+
+<Note>
+The MLP hidden size is always `4 * n_embd` following the standard transformer architecture.
+</Note>
+
+### `dropout`
+
+<ParamField path="dropout" type="float" default="0.0">
+  Dropout probability applied throughout the model (attention, residual connections, embeddings). Set to 0.0 to disable dropout.
+</ParamField>
+
+**Typical values:**
+- Training from scratch: 0.1 - 0.2
+- Fine-tuning pretrained models: 0.0 - 0.1
+- Inference: 0.0 (automatically disabled in eval mode)
+
+<Note>
+GPT-2 pretrained models use dropout=0.0 by default, but you can override it when loading with `from_pretrained()`.
+</Note>
+
+### `bias`
+
+<ParamField path="bias" type="bool" default="True">
+  Whether to include bias terms in Linear layers and LayerNorm layers.
+  - `True`: Include bias (matches GPT-2 architecture)
+  - `False`: No bias (slightly faster and often performs similarly)
+</ParamField>
+
+<Note>
+Setting `bias=False` can lead to slightly better performance and faster training with minimal impact on model quality.
+</Note>
+
+## Usage Examples
+
+### Creating a Default Configuration
+
+```python
+from model import GPTConfig, GPT
+
+# Use default configuration (matches GPT-2 small)
+config = GPTConfig()
+model = GPT(config)
+```
+
+### Creating a Custom Small Model
+
+```python
+# Small model for experimentation
+config = GPTConfig(
+    block_size=256,      # Shorter context
+    vocab_size=10000,    # Smaller vocabulary
+    n_layer=6,           # Fewer layers
+    n_head=6,            # Fewer heads
+    n_embd=384,          # Smaller embedding dimension
+    dropout=0.1,         # Add dropout for regularization
+    bias=False           # Remove bias for efficiency
+)
+model = GPT(config)
+```
+
+### Matching GPT-2 Variants
+
+```python
+# GPT-2 small (124M params)
+config_small = GPTConfig(
+    n_layer=12, n_head=12, n_embd=768
+)
+
+# GPT-2 medium (350M params)
+config_medium = GPTConfig(
+    n_layer=24, n_head=16, n_embd=1024
+)
+
+# GPT-2 large (774M params)
+config_large = GPTConfig(
+    n_layer=36, n_head=20, n_embd=1280
+)
+
+# GPT-2 XL (1558M params)
+config_xl = GPTConfig(
+    n_layer=48, n_head=25, n_embd=1600
+)
+```
+
+### Configuration for Fine-tuning
+
+```python
+# Configuration for fine-tuning with custom context length
+config = GPTConfig(
+    block_size=512,      # Custom context length
+    vocab_size=50304,    # Keep GPT-2 vocabulary
+    n_layer=12,
+    n_head=12,
+    n_embd=768,
+    dropout=0.1,         # Add some dropout
+    bias=True            # Keep bias for pretrained compatibility
+)
+```
+
+## Validation
+
+<Note>
+The GPT model constructor validates that:
+- `vocab_size` is not None
+- `block_size` is not None
+- `n_embd % n_head == 0` (embedding dimension must be divisible by number of heads)
+</Note>
+
+## Parameter Scaling
+
+The total number of parameters scales approximately as:
+
+```
+params ≈ 12 × n_layer × n_embd²
+```
+
+Key contributors:
+- Token embeddings: `vocab_size × n_embd`
+- Position embeddings: `block_size × n_embd`
+- Attention weights per layer: `4 × n_embd²` (Q, K, V projections + output)
+- MLP weights per layer: `8 × n_embd²` (up and down projections)
+
+<Expandable title="Detailed Parameter Count Example">
+For GPT-2 small (n_layer=12, n_embd=768, vocab_size=50257, block_size=1024):
+
+- Token embeddings: 50,257 × 768 = 38.6M
+- Position embeddings: 1,024 × 768 = 0.8M
+- Transformer blocks: 12 × (4×768² + 8×768²) = 85.0M
+- Final layer norm: ~1.5K
+- **Total: ~124M parameters**
+</Expandable>
+
+## Best Practices
+
+1. **Start small**: Use smaller configurations (n_layer=6, n_embd=384) for initial experimentation
+2. **Match architectures**: When fine-tuning, match n_layer, n_head, and n_embd to the pretrained model
+3. **Pad vocab_size**: Round up to multiples of 64 for better GPU utilization
+4. **Context length**: Use smaller block_size for faster training, larger for tasks requiring long context
+5. **Dropout**: Use 0.1-0.2 for training from scratch, 0.0-0.1 for fine-tuning
+
+## See Also
+
+- [GPT Class](/api/gpt) - Main model class that uses GPTConfig
+- [Component Classes](/api/components) - Internal components referenced in architecture

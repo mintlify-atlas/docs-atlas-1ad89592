@@ -1,0 +1,277 @@
+---
+title: "train.py"
+description: "Training script for nanoGPT models with support for single GPU and distributed training"
+---
+
+## Overview
+
+The `train.py` script is the main training interface for nanoGPT. It supports both single GPU training and distributed data parallel (DDP) training across multiple GPUs and nodes.
+
+## Usage
+
+<CodeGroup>
+```bash Single GPU
+python train.py --batch_size=32 --compile=False
+```
+
+```bash DDP - 4 GPUs on 1 Node
+torchrun --standalone --nproc_per_node=4 train.py
+```
+
+```bash DDP - 4 GPUs across 2 Nodes (Master)
+torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 \
+  --master_addr=123.456.123.456 --master_port=1234 train.py
+```
+
+```bash DDP - 4 GPUs across 2 Nodes (Worker)
+torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 \
+  --master_addr=123.456.123.456 --master_port=1234 train.py
+```
+</CodeGroup>
+
+<Note>
+If your cluster does not have Infiniband interconnect, prepend `NCCL_IB_DISABLE=1` to the command.
+</Note>
+
+## Configuration Parameters
+
+All parameters can be overridden via command line arguments or config files using the `configurator.py` system.
+
+### I/O Parameters
+
+<ParamField path="out_dir" type="string" default="out">
+  Directory where checkpoints and logs will be saved
+</ParamField>
+
+<ParamField path="eval_interval" type="integer" default="2000">
+  Number of iterations between evaluations on train/val sets
+</ParamField>
+
+<ParamField path="log_interval" type="integer" default="1">
+  Number of iterations between logging to console
+</ParamField>
+
+<ParamField path="eval_iters" type="integer" default="200">
+  Number of batches to use for evaluation
+</ParamField>
+
+<ParamField path="eval_only" type="boolean" default="false">
+  If true, script exits right after the first evaluation (useful for testing)
+</ParamField>
+
+<ParamField path="always_save_checkpoint" type="boolean" default="true">
+  If true, always save a checkpoint after each evaluation
+</ParamField>
+
+<ParamField path="init_from" type="string" default="scratch">
+  Model initialization mode:
+  - `scratch`: Initialize a new model from scratch
+  - `resume`: Resume training from checkpoint in `out_dir`
+  - `gpt2`, `gpt2-medium`, `gpt2-large`, `gpt2-xl`: Initialize from OpenAI GPT-2 weights
+</ParamField>
+
+### Weights & Biases Logging
+
+<ParamField path="wandb_log" type="boolean" default="false">
+  Enable logging to Weights & Biases
+</ParamField>
+
+<ParamField path="wandb_project" type="string" default="owt">
+  W&B project name
+</ParamField>
+
+<ParamField path="wandb_run_name" type="string" default="gpt2">
+  W&B run name
+</ParamField>
+
+### Data Parameters
+
+<ParamField path="dataset" type="string" default="openwebtext">
+  Dataset name (expects data in `data/{dataset}/` directory)
+</ParamField>
+
+<ParamField path="gradient_accumulation_steps" type="integer" default="40">
+  Number of gradient accumulation steps to simulate larger batch sizes. Default is 5 * 8 = 40.
+</ParamField>
+
+<ParamField path="batch_size" type="integer" default="12">
+  Micro-batch size per GPU. If gradient_accumulation_steps > 1, this is the micro-batch size.
+</ParamField>
+
+<ParamField path="block_size" type="integer" default="1024">
+  Context length for the model (sequence length)
+</ParamField>
+
+### Model Architecture
+
+<ParamField path="n_layer" type="integer" default="12">
+  Number of transformer layers (GPT-2 small: 12, medium: 24, large: 36, xl: 48)
+</ParamField>
+
+<ParamField path="n_head" type="integer" default="12">
+  Number of attention heads (GPT-2 small: 12, medium: 16, large: 20, xl: 25)
+</ParamField>
+
+<ParamField path="n_embd" type="integer" default="768">
+  Embedding dimension (GPT-2 small: 768, medium: 1024, large: 1280, xl: 1600)
+</ParamField>
+
+<ParamField path="dropout" type="float" default="0.0">
+  Dropout rate. For pretraining, 0.0 is recommended. For finetuning, try 0.1+
+</ParamField>
+
+<ParamField path="bias" type="boolean" default="false">
+  Whether to use bias in LayerNorm and Linear layers
+</ParamField>
+
+### AdamW Optimizer
+
+<ParamField path="learning_rate" type="float" default="6e-4">
+  Maximum learning rate
+</ParamField>
+
+<ParamField path="max_iters" type="integer" default="600000">
+  Total number of training iterations
+</ParamField>
+
+<ParamField path="weight_decay" type="float" default="1e-1">
+  Weight decay for AdamW optimizer
+</ParamField>
+
+<ParamField path="beta1" type="float" default="0.9">
+  Adam beta1 parameter
+</ParamField>
+
+<ParamField path="beta2" type="float" default="0.95">
+  Adam beta2 parameter
+</ParamField>
+
+<ParamField path="grad_clip" type="float" default="1.0">
+  Gradient clipping value. Set to 0.0 to disable.
+</ParamField>
+
+### Learning Rate Decay
+
+<ParamField path="decay_lr" type="boolean" default="true">
+  Whether to use learning rate decay (cosine with warmup)
+</ParamField>
+
+<ParamField path="warmup_iters" type="integer" default="2000">
+  Number of warmup iterations for learning rate
+</ParamField>
+
+<ParamField path="lr_decay_iters" type="integer" default="600000">
+  Number of iterations for learning rate decay (should be ~= max_iters per Chinchilla)
+</ParamField>
+
+<ParamField path="min_lr" type="float" default="6e-5">
+  Minimum learning rate (should be ~= learning_rate/10 per Chinchilla)
+</ParamField>
+
+### System Parameters
+
+<ParamField path="device" type="string" default="cuda">
+  Device to use for training: `cpu`, `cuda`, `cuda:0`, `cuda:1`, or `mps` on macOS
+</ParamField>
+
+<ParamField path="dtype" type="string" default="bfloat16 or float16">
+  Data type for training: `float32`, `bfloat16`, or `float16`. 
+  Default is `bfloat16` if supported, otherwise `float16`. 
+  Using `float16` will automatically enable GradScaler.
+</ParamField>
+
+<ParamField path="compile" type="boolean" default="true">
+  Use PyTorch 2.0 `torch.compile()` to optimize the model (requires PyTorch 2.0+)
+</ParamField>
+
+### DDP Parameters
+
+<ParamField path="backend" type="string" default="nccl">
+  Backend for distributed training: `nccl`, `gloo`, etc.
+</ParamField>
+
+## Distributed Training Setup
+
+The script automatically detects if it's running in DDP mode by checking the `RANK` environment variable. When using `torchrun`, these variables are set automatically.
+
+### Key DDP Features
+
+- **Automatic Process Group Initialization**: The script calls `init_process_group()` when DDP is detected
+- **Gradient Accumulation Adjustment**: `gradient_accumulation_steps` is divided by world size to maintain effective batch size
+- **Master Process**: Only rank 0 performs logging, checkpointing, and evaluation
+- **Efficient Gradient Sync**: Gradients are only synchronized on the last micro-step of gradient accumulation
+
+<Warning>
+Ensure that `gradient_accumulation_steps` is divisible by the number of GPUs (world size), otherwise the script will fail with an assertion error.
+</Warning>
+
+## Training Loop Details
+
+### Cosine Learning Rate Schedule
+
+The script implements a cosine learning rate decay with linear warmup:
+1. Linear warmup for `warmup_iters` steps
+2. Cosine decay from `learning_rate` to `min_lr` over `lr_decay_iters` steps
+3. Constant `min_lr` after decay period
+
+### Model Flops Utilization (MFU)
+
+The script estimates and logs the Model Flops Utilization, which measures how efficiently the GPU is being used compared to its theoretical peak performance.
+
+### Checkpointing
+
+Checkpoints are saved to `{out_dir}/ckpt.pt` and include:
+- Model state dict
+- Optimizer state dict
+- Model architecture arguments
+- Current iteration number
+- Best validation loss
+- Full configuration
+
+## Example Configurations
+
+<CodeGroup>
+```bash Quick Debug Run
+python train.py \
+  --batch_size=8 \
+  --compile=False \
+  --eval_interval=100 \
+  --max_iters=1000
+```
+
+```bash Fine-tune GPT-2
+python train.py \
+  --init_from=gpt2 \
+  --dataset=shakespeare \
+  --batch_size=1 \
+  --gradient_accumulation_steps=32 \
+  --dropout=0.1 \
+  --max_iters=5000
+```
+
+```bash Resume Training
+python train.py \
+  --init_from=resume \
+  --out_dir=out-custom
+```
+
+```bash W&B Logging
+python train.py \
+  --wandb_log=True \
+  --wandb_project=my-project \
+  --wandb_run_name=experiment-1
+```
+</CodeGroup>
+
+## Performance Considerations
+
+- **torch.compile()**: Enabled by default on PyTorch 2.0+, provides ~20-30% speedup after compilation
+- **Mixed Precision**: Using `bfloat16` or `float16` reduces memory usage and increases throughput
+- **Gradient Accumulation**: Allows effective larger batch sizes without increasing memory usage
+- **TF32**: Automatically enabled on Ampere+ GPUs for faster matmul operations
+
+## See Also
+
+- [Sample Script](/api/sample) - Generate text from trained models
+- [Benchmark Script](/api/bench) - Benchmark training performance
+- [Model Architecture](/model/architecture) - GPT model implementation details
